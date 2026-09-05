@@ -51,6 +51,9 @@ target_link_libraries(lcr_host PUBLIC lcr_json)
 target_compile_options(lcr_host PRIVATE
   $<$<CXX_COMPILER_ID:GNU,Clang,AppleClang>:-Wall -Wextra -Wno-unused-parameter>)
 
+add_executable(lcr-tokenize tools/tokenize_main.cpp)
+target_link_libraries(lcr-tokenize PRIVATE lcr_host)
+
 # ---------------------------------------------------------------------------
 # CUDA half of the build. Optional: without nvcc the host targets still build.
 # ---------------------------------------------------------------------------

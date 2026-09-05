@@ -23,8 +23,8 @@ decode-phase attention, and sampling. cuBLAS does the matmuls.
 ## Status
 
 - [x] Phase 0: repo skeleton, CMake, host/CUDA split
-- [ ] Phase 1: safetensors loader and model config
-- [ ] Phase 2: BPE tokenizer
+- [x] Phase 1: safetensors loader and model config
+- [x] Phase 2: BPE tokenizer, validated against the reference tokenizer
 - [ ] Phase 3: activation arena and KV cache
 - [ ] Phase 4: CUDA kernels
 - [ ] Phase 5: end-to-end forward pass, greedy decode
@@ -63,3 +63,19 @@ with tied input and output embeddings, RoPE base 500000 with llama3 frequency sc
 
 The weights are gated on Hugging Face. Accept the license on the model page and run
 `huggingface-cli login` before the script will work.
+
+## Checking the tokenizer against the reference
+
+Replacing a regex engine and a Rust BPE library with hand-written C++ is only
+trustworthy if the output matches token for token, so there is a differential test
+against the Hugging Face `tokenizers` library:
+
+```
+python3 -m venv .venv && .venv/bin/pip install tokenizers
+.venv/bin/python tools/check_tokenizer.py models/Llama-3.2-1B-Instruct
+```
+
+The corpus is 850 inputs: hand-picked cases for every branch of the pretokenizer
+regex, a sweep across the whole Unicode range, 600 random strings drawn from
+boundary-heavy alphabets, and this repository's own source files. Current result is
+54,323 tokens with zero mismatches.
