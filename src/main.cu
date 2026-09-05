@@ -1,4 +1,6 @@
 // Command-line front end: generate text, or measure how fast it generates.
+#include <nlohmann/json.hpp>
+
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -38,6 +40,7 @@ struct Args {
   // some parts. In GB/s.
   double peak_bandwidth_gb = 0.0;
   bool quiet = false;
+  bool json_output = false;
 };
 
 [[noreturn]] void usage(int code) {
@@ -62,7 +65,8 @@ struct Args {
       "  --splits N             decode attention blocks per KV head, 0 to choose\n"
       "  --device N             CUDA device index\n"
       "  --peak-bandwidth GB    override the theoretical peak used in the report\n"
-      "  --bench                print timing and bandwidth instead of only text\n"
+      "  --bench                print timing and bandwidth after the text\n"
+      "  --json                 emit the benchmark report as JSON\n"
       "  --quiet                suppress the loading banner\n");
   std::exit(code);
 }
@@ -81,6 +85,7 @@ Args parse_args(int argc, char** argv) {
     else if (flag == "--system") args.system_prompt = require_value(argc, argv, &i);
     else if (flag == "--chat") args.chat = true;
     else if (flag == "--bench") args.benchmark = true;
+    else if (flag == "--json") { args.benchmark = true; args.json_output = true; }
     else if (flag == "--quiet") args.quiet = true;
     else if (flag == "--paged") args.paged = true;
     else if (flag == "--max-tokens") args.max_new_tokens = std::stoi(require_value(argc, argv, &i));
@@ -162,26 +167,54 @@ class Utf8Streamer {
   std::string pending_;
 };
 
-void print_report(const Args& args, const Model& model,
-                  const lcr::DeviceInfo& device, double prefill_ms,
-                  int prompt_tokens, double decode_ms, int decode_steps,
-                  int final_length) {
+struct Metrics {
+  double prefill_ms = 0.0;
+  int prompt_tokens = 0;
+  double decode_ms = 0.0;
+  int decode_steps = 0;
+  int final_length = 0;
+  double bytes_per_token = 0.0;
+  double achieved_bandwidth = 0.0;
+  double peak_bandwidth = 0.0;
+};
+
+Metrics compute_metrics(const Args& args, const Model& model,
+                        const lcr::DeviceInfo& device, double prefill_ms,
+                        int prompt_tokens, double decode_ms, int decode_steps,
+                        int final_length) {
   const lcr::ForwardStats& stats = model.stats();
-  const double peak = args.peak_bandwidth_gb > 0.0
-                          ? args.peak_bandwidth_gb * 1e9
-                          : device.peak_bandwidth_bytes_per_second();
+  Metrics m;
+  m.prefill_ms = prefill_ms;
+  m.prompt_tokens = prompt_tokens;
+  m.decode_ms = decode_ms;
+  m.decode_steps = decode_steps;
+  m.final_length = final_length;
+  m.peak_bandwidth = args.peak_bandwidth_gb > 0.0
+                         ? args.peak_bandwidth_gb * 1e9
+                         : device.peak_bandwidth_bytes_per_second();
 
   // Bytes the memory bus has to move per decoded token: every weight, once,
   // plus the cache read, which grows by one position per step. Averaged over
   // the run the cache term sits at the mean sequence length.
-  const double mean_length =
-      prompt_tokens + (decode_steps + 1) / 2.0;
-  const double bytes_per_token =
-      static_cast<double>(stats.weight_bytes_per_token) +
-      mean_length * static_cast<double>(stats.kv_bytes_per_position);
+  const double mean_length = prompt_tokens + (decode_steps + 1) / 2.0;
+  m.bytes_per_token = static_cast<double>(stats.weight_bytes_per_token) +
+                      mean_length * static_cast<double>(stats.kv_bytes_per_position);
   const double seconds_per_token =
       decode_ms / 1000.0 / std::max(1, decode_steps);
-  const double achieved = bytes_per_token / seconds_per_token;
+  m.achieved_bandwidth = m.bytes_per_token / seconds_per_token;
+  return m;
+}
+
+void print_report(const Args& args, const Model& model,
+                  const lcr::DeviceInfo& device, const Metrics& m) {
+  const lcr::ForwardStats& stats = model.stats();
+  const double peak = m.peak_bandwidth;
+  const double achieved = m.achieved_bandwidth;
+  const int prompt_tokens = m.prompt_tokens;
+  const int decode_steps = m.decode_steps;
+  const int final_length = m.final_length;
+  const double prefill_ms = m.prefill_ms;
+  const double decode_ms = m.decode_ms;
 
   std::printf("\n");
   std::printf("device            %s\n", device.summary().c_str());
@@ -231,6 +264,59 @@ void print_report(const Args& args, const Model& model,
               lcr::format_bytes(
                   lcr::KvCache::bytes_for(model.config(), final_length))
                   .c_str());
+}
+
+
+// Same numbers as print_report, in a form tools/benchmark.py can read without
+// parsing prose.
+void print_json(const Args& args, const Model& model,
+                const lcr::DeviceInfo& device, const Metrics& m,
+                double load_ms) {
+  const lcr::ForwardStats& stats = model.stats();
+  const int page_positions =
+      ((m.final_length + args.page_size - 1) / args.page_size) * args.page_size;
+
+  nlohmann::json doc;
+  doc["runtime"] = "llama-cuda-runtime";
+  doc["device"] = device.name;
+  doc["device_summary"] = device.summary();
+  doc["multiprocessors"] = device.multiprocessors;
+  doc["dtype"] = lcr::kElemName;
+  doc["model"] = model.config().summary();
+  doc["load_ms"] = load_ms;
+  doc["weight_bytes"] = model.weight_bytes();
+  doc["arena_peak_bytes"] = model.arena().peak();
+
+  doc["prompt_tokens"] = m.prompt_tokens;
+  doc["prefill_ms"] = m.prefill_ms;
+  doc["prefill_tokens_per_second"] =
+      m.prompt_tokens / (m.prefill_ms / 1000.0);
+  doc["decode_steps"] = m.decode_steps;
+  doc["decode_ms"] = m.decode_ms;
+  doc["decode_ms_per_token"] = m.decode_ms / std::max(1, m.decode_steps);
+  doc["decode_tokens_per_second"] =
+      m.decode_steps / (m.decode_ms / 1000.0);
+
+  doc["weight_bytes_per_token"] = stats.weight_bytes_per_token;
+  doc["kv_bytes_per_position"] = stats.kv_bytes_per_position;
+  doc["bytes_per_token"] = m.bytes_per_token;
+  doc["achieved_bandwidth_bytes_per_second"] = m.achieved_bandwidth;
+  doc["peak_bandwidth_bytes_per_second"] = m.peak_bandwidth;
+  doc["bandwidth_utilization"] = m.achieved_bandwidth / m.peak_bandwidth;
+
+  doc["kv_layout"] = args.paged ? "paged" : "contiguous";
+  doc["kv_page_size"] = args.page_size;
+  doc["sequence_length"] = m.final_length;
+  doc["kv_bytes_contiguous_full_context"] = lcr::KvCache::bytes_for(
+      model.config(), model.config().max_position_embeddings);
+  doc["kv_bytes_contiguous_max_seq"] =
+      lcr::KvCache::bytes_for(model.config(), args.max_seq);
+  doc["kv_bytes_paged"] =
+      lcr::KvCache::bytes_for(model.config(), page_positions);
+  doc["kv_bytes_ideal"] =
+      lcr::KvCache::bytes_for(model.config(), m.final_length);
+
+  std::printf("%s\n", doc.dump(2).c_str());
 }
 
 int run(int argc, char** argv) {
@@ -313,8 +399,15 @@ int run(int argc, char** argv) {
   std::printf("\n");
 
   if (args.benchmark) {
-    print_report(args, model, device, prefill_ms, static_cast<int>(prompt.size()),
-                 decode_ms, decode_steps, model.position());
+    const Metrics metrics =
+        compute_metrics(args, model, device, prefill_ms,
+                        static_cast<int>(prompt.size()), decode_ms, decode_steps,
+                        model.position());
+    if (args.json_output) {
+      print_json(args, model, device, metrics, load_ms);
+    } else {
+      print_report(args, model, device, metrics);
+    }
   }
   (void)generated;
   return 0;
