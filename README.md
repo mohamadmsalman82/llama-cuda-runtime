@@ -151,30 +151,40 @@ That's the entire dependency list.
 ## Architecture
 
 ```mermaid
-flowchart TD
-    A["safetensors mmap"] --> B["one device allocation<br/>in read order"]
-    T["tokenizer.json"] --> TK["byte-level BPE"]
-    TK --> E["embedding lookup"]
-    B --> N1
-    E --> N1
+flowchart LR
+    subgraph SETUP["load"]
+        direction TB
+        A["safetensors<br/>mmap"] --> B["one device allocation,<br/>in read order"]
+        T["tokenizer.json"] --> TK["byte-level BPE"]
+        TK --> E["embedding lookup"]
+    end
 
-    subgraph L["one of 16 layers"]
+    subgraph ATTN["attention block"]
+        direction TB
         N1["RMSNorm"] --> QKV["fused QKV<br/>1 GEMM"]
         QKV --> R["RoPE + KV write<br/>transpose fused in"]
-        R --> AT{"prefill<br/>or decode?"}
+        R --> AT{"phase?"}
         AT -->|prefill| PA["batched GEMM<br/>+ causal softmax"]
         AT -->|decode| DA["custom kernel<br/>GQA group per block"]
         PA --> O["o_proj"]
         DA --> O
-        O --> F1["residual + RMSNorm<br/>fused"]
-        F1 --> GU["fused gate/up<br/>1 GEMM"]
-        GU --> SW["SwiGLU"]
-        SW --> DN["down_proj"]
+    end
+
+    subgraph MLP["MLP block"]
+        direction TB
+        F1["residual + RMSNorm<br/>fused"] --> GU["fused gate/up<br/>1 GEMM"]
+        GU --> SW["SwiGLU"] --> DN["down_proj"]
         DN --> F2["residual + RMSNorm<br/>fused, crosses layer"]
     end
 
-    F2 --> LM["lm_head<br/>last position only"]
-    LM --> S["sampling<br/>histogram, no 128k sort"]
+    subgraph OUT["output"]
+        direction TB
+        LM["lm_head<br/>last position only"] --> S["sampling<br/>histogram, no 128k sort"]
+    end
+
+    SETUP --> ATTN
+    ATTN --> MLP
+    MLP -->|"x16 layers"| OUT
 ```
 
 <details>
