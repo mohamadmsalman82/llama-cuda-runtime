@@ -67,24 +67,20 @@ fraction of that hardware ceiling the implementation actually reaches.
 
 ---
 
-## 2. The unusual constraint
+## 2. Building and validating without a GPU
 
-The entire project was written on an Apple M4 Pro MacBook. That machine has no
-NVIDIA GPU, no CUDA toolkit, and no Docker. Nothing could be compiled, let alone
-run.
+The CUDA half of a project like this is the part most likely to be wrong and the
+part hardest to check, because normally you need the hardware to find out. Two
+pieces of tooling remove that dependency, and both stayed useful after hardware
+was available.
 
-Writing 2000 lines of CUDA that has never been near a compiler is a good way to
-produce 2000 lines of plausible-looking nonsense. Every kernel launch
-configuration, every template instantiation, every cuBLAS argument order would
-meet a compiler for the first time on rented hardware, at hourly cost, all at
-once.
+### A compile check with no toolkit
 
-### The workaround: a compile shim
-
-CUDA C++ is ordinary C++17 with one syntactic exception: the `<<<grid, block>>>`
-kernel launch, which no host compiler can parse. Everything else, including
-`__global__` functions, `__device__` helpers, shared memory declarations and
-template dispatch, is either valid C++ already or can be made so with a macro.
+CUDA C++ is ordinary C++17 with one syntactic exception: the
+`<<<grid, block>>>` kernel launch, which no host compiler can parse. Everything
+else, including `__global__` functions, `__device__` helpers, shared memory
+declarations and template dispatch, is either valid C++ already or can be made
+so with a macro.
 
 So `tools/hostcheck.sh` strips the launch syntax with a regular expression and
 compiles every `.cu` file as plain C++17 against stand-in headers in
@@ -100,10 +96,12 @@ compile.
 It proves the code compiles. It proves nothing about what it computes. The
 distinction matters and is stated everywhere the tool appears.
 
-To confirm it was not vacuous, I deliberately broke a kernel call by removing an
-argument. The shim caught it. It also caught two genuine bugs during
+To confirm it was not vacuous, a kernel call was deliberately broken by removing
+an argument. The shim caught it. It also caught two genuine bugs during
 development: `dtype.cuh` using `uint2` and `uint4` without including
 `cuda_runtime.h`, and two missing includes in the test file.
+
+The payoff: **the first real `nvcc` build produced zero errors.**
 
 ### Testing the loader without the weights
 
@@ -117,10 +115,8 @@ filesystem reports the full 2.5 GB length while storing 41 kilobytes. The whole
 load path, every shape check, the tied-embedding detection and all the memory
 accounting can then be exercised after a 200 kB download.
 
-That is how the checkpoint inventory below was verified before any GPU existed:
-all 146 required tensors present, correct shapes, correct dtype.
-
----
+That is how the checkpoint inventory was verified before any weights were
+downloaded: all 146 required tensors present, correct shapes, correct dtype.
 
 ## 3. How it was built
 
@@ -561,8 +557,8 @@ shipping path, which it does, still at 16 of 16 tokens identical.
 ### Two compile errors the shim caught
 
 `dtype.cuh` used `uint2` and `uint4` without including `cuda_runtime.h`, and the
-kernel test file was missing two includes. Both would have been trivial on a
-GPU box and both were found for free before renting one.
+kernel test file was missing two includes. Both were found by the host compile
+check before any GPU build was attempted.
 
 ---
 

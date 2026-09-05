@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Compile-checks every CUDA source with an ordinary C++ compiler.
 #
-# The project is written on a machine with no NVIDIA toolkit, so without this
-# the kernels would first meet a compiler on the GPU box. This strips the
-# <<<...>>> launch syntax, which is the only part of CUDA C++ a host compiler
-# cannot parse, and builds each translation unit against the stand-in headers in
-# tools/hostcheck/. Every kernel body, every template instantiation, and every
-# cuBLAS call signature gets type-checked.
+# Lets the CUDA half of the project be type-checked with no NVIDIA toolkit
+# installed. It strips the <<<...>>> launch syntax, which is the only part of
+# CUDA C++ a host compiler cannot parse, and builds each translation unit
+# against the stand-in headers in tools/hostcheck/. Every kernel body, every
+# template instantiation, and every cuBLAS call signature gets type-checked.
 #
 # It proves the code compiles. It proves nothing about what it computes.
 #
@@ -31,7 +30,7 @@ if [ ! -f "$ROOT/third_party/nlohmann/json.hpp" ]; then
   exit 2
 fi
 
-# bash 3.2, which is what macOS ships, has no mapfile.
+# bash 3.2 has no mapfile, so this stays portable to older shells.
 SOURCES=$(cd "$ROOT" && find src tools tests -name '*.cu' 2>/dev/null | sort)
 
 status=0

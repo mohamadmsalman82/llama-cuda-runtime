@@ -35,8 +35,8 @@ def main():
                              "runtime computes in, float32 isolates whether a "
                              "difference is an implementation bug or rounding")
     parser.add_argument("--device", default="cpu",
-                        help="where to run the reference; cpu keeps this usable "
-                             "on a machine with no GPU")
+                        help="where to run the reference; cpu works anywhere, "
+                             "cuda is faster when a GPU is present")
     parser.add_argument("--generate", type=int, default=16,
                         help="greedy tokens to also record, as an end-to-end "
                              "check on top of the layer comparison")

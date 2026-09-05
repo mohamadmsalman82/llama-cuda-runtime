@@ -1,11 +1,10 @@
 // Host-only stand-ins for the CUDA runtime and device intrinsics.
 //
-// This directory exists for one reason: the project is developed on a machine
-// with no NVIDIA toolkit, and 2000 lines of kernel code that has never been
-// through a compiler is 2000 lines of guesses. tools/hostcheck.sh strips the
-// <<<...>>> launch syntax and compiles every .cu file as ordinary C++17
-// against these headers, which type-checks every kernel body, every template
-// instantiation, and every API call.
+// These let the CUDA sources be type-checked with no NVIDIA toolkit installed.
+// tools/hostcheck.sh strips the <<<...>>> launch syntax and compiles every .cu
+// file as ordinary C++17 against these headers, which checks every kernel body,
+// every template instantiation, and every API call. Kernel code that has never
+// been through a compiler is code nobody has verified even parses.
 //
 // It is a compile check and nothing more. The functions here return success
 // without doing anything and the intrinsics return their input. Nothing in this

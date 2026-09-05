@@ -35,9 +35,9 @@ add_library(lcr_json INTERFACE)
 target_include_directories(lcr_json INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 # ---------------------------------------------------------------------------
-# Host library. Everything here is plain C++17 and builds on a machine with no
-# NVIDIA hardware, which is what lets the loader and tokenizer be developed and
-# tested away from the GPU box.
+# Host library. Everything here is plain C++17 and builds with no CUDA toolkit
+# present, so the loader, config parser and tokenizer can be built and tested
+# independently of the GPU half.
 # ---------------------------------------------------------------------------
 add_library(lcr_host STATIC
   src/common.cpp

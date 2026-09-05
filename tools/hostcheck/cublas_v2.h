@@ -1,6 +1,6 @@
 // See cuda_runtime.h in this directory: compile-check stand-in, not real cuBLAS.
 // The signatures match the real ones so a wrong argument order or count in the
-// GEMM calls is caught here rather than on the GPU box.
+// GEMM calls is caught here rather than at the first GPU build.
 #pragma once
 
 #include <cuda_runtime.h>

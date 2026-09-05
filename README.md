@@ -295,23 +295,25 @@ is *shared* across sequences, which is out of scope here.
 
 ---
 
-## Developing without a GPU
+## Building and checking without CUDA installed
 
-The entire runtime was written on an **M4 Pro MacBook** — no NVIDIA GPU, no CUDA
-toolkit, no Docker. Nothing could be compiled, let alone run.
+The host half of the project (safetensors loader, config parser, tokenizer, and
+their tests) builds and runs with no CUDA toolkit present: CMake detects the
+absence of `nvcc` and drops the GPU targets cleanly.
 
-`tools/hostcheck.sh` strips the `<<<grid, block>>>` launch syntax (the only part
-of CUDA C++ a host compiler can't parse) and compiles every `.cu` file as plain
-C++17 against stand-in headers. Every kernel body, template instantiation, and
-cuBLAS signature gets type-checked.
+The CUDA sources can be checked too. `tools/hostcheck.sh` strips the
+`<<<grid, block>>>` launch syntax, which is the only part of CUDA C++ a host
+compiler cannot parse, and compiles every `.cu` file as plain C++17 against
+stand-in headers in `tools/hostcheck/`. Every kernel body, every template
+instantiation, and every cuBLAS call signature gets type-checked.
 
 ```bash
-./tools/hostcheck.sh     # 13 sources, no GPU required
+./tools/hostcheck.sh     # 13 CUDA sources, no GPU or toolkit required
 ```
 
-**It worked: the first real `nvcc` build produced zero errors.** It also caught
-two genuine bugs pre-flight. It proves the code *compiles*, nothing about what it
-computes — that's what the validation above is for.
+It proves the code *compiles*, nothing about what it computes, which is what the
+validation above is for. It has caught real bugs, including a header using
+`uint2` and `uint4` without including `cuda_runtime.h`.
 
 <sub>`tools/make_sparse_checkpoint.py` goes further: it fetches only the 17 kB
 safetensors header and writes a sparse file reporting 2.5 GB while occupying

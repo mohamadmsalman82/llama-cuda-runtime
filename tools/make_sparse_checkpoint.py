@@ -33,8 +33,8 @@ HEADER_PROBE_BYTES = 1 << 20
 def fetch(url, byte_range=None):
     """Downloads with curl, which uses the system trust store.
 
-    Python builds from python.org ship without a certificate bundle wired up, so
-    urllib fails to verify huggingface.co on a stock macOS install.
+    Some Python builds ship without a certificate bundle wired up, so urllib
+    fails to verify huggingface.co where curl succeeds.
     """
     command = ["curl", "-sS", "-L", "--fail"]
     if byte_range is not None:
