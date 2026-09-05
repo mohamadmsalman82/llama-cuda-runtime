@@ -152,6 +152,13 @@ Same model, same GPU, same prompt, same token count, with prefill and decode tim
 separately. The GGUF has to be f16: a quantized one moves fewer bytes and is a
 different measurement.
 
+## Design notes
+
+[docs/design.md](docs/design.md) has the arithmetic behind the project: why decode
+is bandwidth bound and prefill is not, what actually crosses the memory bus per
+token, the ceiling that implies on several GPUs, why the layouts are what they are,
+and the questions the profiling pass exists to answer.
+
 ## Layout
 
 ```
