@@ -44,6 +44,7 @@ struct Args {
   // 170 ms on first use, which is many times a real prefill and would
   // otherwise be reported as prefill time.
   int warmup = 0;
+  bool profile = false;
   bool quiet = false;
   bool json_output = false;
 };
@@ -73,6 +74,7 @@ struct Args {
       "  --bench                print timing and bandwidth after the text\n"
       "  --warmup N             discard N passes before timing (default 1 with\n"
       "                         --bench, 0 otherwise)\n"
+      "  --profile              per-stage timing breakdown of the decode step\n"
       "  --json                 emit the benchmark report as JSON\n"
       "  --quiet                suppress the loading banner\n");
   std::exit(code);
@@ -94,6 +96,7 @@ Args parse_args(int argc, char** argv) {
     else if (flag == "--chat") args.chat = true;
     else if (flag == "--bench") args.benchmark = true;
     else if (flag == "--json") { args.benchmark = true; args.json_output = true; }
+    else if (flag == "--profile") { args.profile = true; args.benchmark = true; }
     else if (flag == "--warmup") { args.warmup = std::stoi(require_value(argc, argv, &i)); warmup_set = true; }
     else if (flag == "--quiet") args.quiet = true;
     else if (flag == "--paged") args.paged = true;
@@ -330,6 +333,45 @@ void print_json(const Args& args, const Model& model,
   std::printf("%s\n", doc.dump(2).c_str());
 }
 
+
+// Per-stage breakdown of a decode step, and what it says about where the time
+// is going that is not inside a kernel.
+void print_profile(const Model& model, int decode_steps, double decode_ms) {
+  const lcr::Profiler& profiler = model.profiler();
+  const std::vector<lcr::Profiler::Entry> entries = profiler.entries();
+  const double measured = profiler.total_ms();
+  const int steps = std::max(1, decode_steps);
+
+  std::printf("\nper-stage decode profile, averaged over %d steps\n\n", steps);
+  std::printf("%-24s %10s %10s %8s\n", "stage", "us/token", "% of kernel",
+              "calls");
+  std::printf("%s\n", std::string(56, '-').c_str());
+  for (const lcr::Profiler::Entry& entry : entries) {
+    std::printf("%-24s %10.1f %9.1f%% %8d\n", entry.name.c_str(),
+                1000.0 * entry.total_ms / steps,
+                100.0 * entry.total_ms / measured,
+                entry.launches / steps);
+  }
+  std::printf("%s\n", std::string(56, '-').c_str());
+  std::printf("%-24s %10.1f %9.1f%% %8d\n", "total inside kernels",
+              1000.0 * measured / steps, 100.0,
+              profiler.total_launches() / steps);
+
+  // The profiled run is slower than an unprofiled one, because recording two
+  // CUDA events per stage costs time and forces ordering. Reporting both makes
+  // the perturbation visible instead of hiding it.
+  const double wall_us = 1000.0 * decode_ms / steps;
+  std::printf("\nwall clock per token, profiled   %.1f us\n", wall_us);
+  std::printf("sum of stage timings             %.1f us\n",
+              1000.0 * measured / steps);
+  std::printf("unaccounted (gaps, event cost)   %.1f us (%.1f%%)\n",
+              wall_us - 1000.0 * measured / steps,
+              100.0 * (wall_us - 1000.0 * measured / steps) / wall_us);
+  std::printf("\nCompare the wall clock above against a run without --profile:\n"
+              "the difference is what the instrumentation itself costs, and it\n"
+              "is dominated by per-launch overhead rather than kernel work.\n");
+}
+
 int run(int argc, char** argv) {
   const Args args = parse_args(argc, argv);
 
@@ -375,6 +417,8 @@ int run(int argc, char** argv) {
                          << " tokens does not fit in --max-seq "
                          << args.max_seq);
 
+  // Profiling is switched on only after warmup, so first-call costs do not
+  // land in the stage timings.
   // Discarded passes, so the timed ones measure the model rather than CUDA
   // context setup and cuBLAS algorithm selection. Both phases have to run:
   // they go through different code, and each has its own first-call cost.
@@ -382,6 +426,11 @@ int run(int argc, char** argv) {
     const float* warm = model.prefill(prompt);
     model.decode(model.sample(warm, 0.0f, 0, 1.0f, 0.0f));
     model.reset();
+  }
+
+  if (args.profile) {
+    model.profiler().reset();
+    model.profiler().set_enabled(true);
   }
 
   Utf8Streamer streamer;
@@ -428,6 +477,7 @@ int run(int argc, char** argv) {
     } else {
       print_report(args, model, device, metrics);
     }
+    if (args.profile) print_profile(model, decode_steps, decode_ms);
   }
   (void)generated;
   return 0;

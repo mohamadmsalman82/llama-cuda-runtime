@@ -84,6 +84,7 @@ if(CMAKE_CUDA_COMPILER)
     src/cuda_utils.cu
     src/kv_cache.cu
     src/model.cu
+    src/profiler.cu
     src/kernels/elementwise.cu
     src/kernels/rmsnorm.cu
     src/kernels/rope.cu

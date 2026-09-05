@@ -21,6 +21,7 @@
 #include "arena.h"
 #include "config.h"
 #include "kv_cache.cuh"
+#include "profiler.h"
 #include "safetensors.h"
 
 namespace lcr {
@@ -114,6 +115,11 @@ class Model {
     std::vector<float> values;
   };
   void set_capture_activations(bool enabled) { capture_activations_ = enabled; }
+
+  // Per-stage timing of the forward pass. Off by default: recording CUDA
+  // events around every stage perturbs the timings it collects.
+  Profiler& profiler() { return profiler_; }
+  const Profiler& profiler() const { return profiler_; }
   const std::vector<Tap>& activation_taps() const { return taps_; }
 
  private:
@@ -175,6 +181,7 @@ class Model {
   ForwardStats stats_;
   bool capture_activations_ = false;
   std::vector<Tap> taps_;
+  Profiler profiler_;
 };
 
 }  // namespace lcr

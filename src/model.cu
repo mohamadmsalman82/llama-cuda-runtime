@@ -317,6 +317,7 @@ const float* Model::prefill(const std::vector<int>& tokens) {
   timer.stop(stream_);
   CUDA_CHECK(cudaStreamSynchronize(stream_));
   stats_.last_prefill_ms = timer.elapsed_ms();
+  if (profiler_.enabled()) profiler_.collect();
   return logits_;
 }
 
@@ -339,6 +340,7 @@ const float* Model::decode(int token) {
   timer.stop(stream_);
   CUDA_CHECK(cudaStreamSynchronize(stream_));
   stats_.last_decode_ms = timer.elapsed_ms();
+  if (profiler_.enabled()) profiler_.collect();
   return logits_;
 }
 
@@ -356,51 +358,84 @@ void Model::run_layers(int tokens, int start_position) {
   for (int layer = 0; layer < config_.num_layers; ++layer) {
     const LayerWeights& w = layers_[static_cast<size_t>(layer)];
 
-    launch_rmsnorm(normed_, x_, w.input_norm, tokens, hidden,
-                   config_.rms_norm_eps, stream_);
-
-    gemm_nt(cublas_, q_proj_, kCublasElemType, normed_, w.q_proj, tokens, hidden,
-            config_.q_dim());
-    gemm_nt(cublas_, k_proj_, kCublasElemType, normed_, w.k_proj, tokens, hidden,
-            config_.kv_dim());
-    gemm_nt(cublas_, v_proj_, kCublasElemType, normed_, w.v_proj, tokens, hidden,
-            config_.kv_dim());
-
-    launch_rope_q(q_heads_, q_proj_, inv_freq_, tokens, start_position,
-                  config_.num_heads, config_.head_dim, stream_);
-    const KvCacheView view = kv_cache_->view(layer);
-    launch_rope_write_kv(view, k_proj_, v_proj_, inv_freq_, tokens,
-                         start_position,
-                         options_.kv_layout == KvLayout::kPaged, stream_);
-
-    if (tokens == 1) {
-      attention_decode(layer, start_position);
-    } else {
-      attention_prefill(layer, tokens, start_position);
+    {
+      ProfileScope scope(&profiler_, "rmsnorm", stream_);
+      launch_rmsnorm(normed_, x_, w.input_norm, tokens, hidden,
+                     config_.rms_norm_eps, stream_);
+    }
+    {
+      ProfileScope scope(&profiler_, "qkv_proj (3 GEMM)", stream_);
+      gemm_nt(cublas_, q_proj_, kCublasElemType, normed_, w.q_proj, tokens,
+              hidden, config_.q_dim());
+      gemm_nt(cublas_, k_proj_, kCublasElemType, normed_, w.k_proj, tokens,
+              hidden, config_.kv_dim());
+      gemm_nt(cublas_, v_proj_, kCublasElemType, normed_, w.v_proj, tokens,
+              hidden, config_.kv_dim());
     }
 
-    gemm_nt(cublas_, proj_out_, kCublasElemType, attn_out_, w.o_proj, tokens,
-            config_.q_dim(), hidden);
-    launch_add_residual(x_, proj_out_, residual_elements, stream_);
-
-    launch_rmsnorm(normed_, x_, w.post_attention_norm, tokens, hidden,
-                   config_.rms_norm_eps, stream_);
-    gemm_nt(cublas_, gate_, kCublasElemType, normed_, w.gate_proj, tokens, hidden,
-            ffn);
-    gemm_nt(cublas_, up_, kCublasElemType, normed_, w.up_proj, tokens, hidden,
-            ffn);
-    launch_swiglu(act_, gate_, up_, static_cast<int64_t>(tokens) * ffn, stream_);
-    gemm_nt(cublas_, proj_out_, kCublasElemType, act_, w.down_proj, tokens, ffn,
-            hidden);
-    launch_add_residual(x_, proj_out_, residual_elements, stream_);
+    const KvCacheView view = kv_cache_->view(layer);
+    {
+      ProfileScope scope(&profiler_, "rope + kv write", stream_);
+      launch_rope_q(q_heads_, q_proj_, inv_freq_, tokens, start_position,
+                    config_.num_heads, config_.head_dim, stream_);
+      launch_rope_write_kv(view, k_proj_, v_proj_, inv_freq_, tokens,
+                           start_position,
+                           options_.kv_layout == KvLayout::kPaged, stream_);
+    }
+    {
+      ProfileScope scope(&profiler_, "attention", stream_);
+      if (tokens == 1) {
+        attention_decode(layer, start_position);
+      } else {
+        attention_prefill(layer, tokens, start_position);
+      }
+    }
+    {
+      ProfileScope scope(&profiler_, "o_proj (GEMM)", stream_);
+      gemm_nt(cublas_, proj_out_, kCublasElemType, attn_out_, w.o_proj, tokens,
+              config_.q_dim(), hidden);
+    }
+    {
+      ProfileScope scope(&profiler_, "residual add", stream_);
+      launch_add_residual(x_, proj_out_, residual_elements, stream_);
+    }
+    {
+      ProfileScope scope(&profiler_, "rmsnorm", stream_);
+      launch_rmsnorm(normed_, x_, w.post_attention_norm, tokens, hidden,
+                     config_.rms_norm_eps, stream_);
+    }
+    {
+      ProfileScope scope(&profiler_, "mlp up/gate (2 GEMM)", stream_);
+      gemm_nt(cublas_, gate_, kCublasElemType, normed_, w.gate_proj, tokens,
+              hidden, ffn);
+      gemm_nt(cublas_, up_, kCublasElemType, normed_, w.up_proj, tokens, hidden,
+              ffn);
+    }
+    {
+      ProfileScope scope(&profiler_, "swiglu", stream_);
+      launch_swiglu(act_, gate_, up_, static_cast<int64_t>(tokens) * ffn,
+                    stream_);
+    }
+    {
+      ProfileScope scope(&profiler_, "mlp down (GEMM)", stream_);
+      gemm_nt(cublas_, proj_out_, kCublasElemType, act_, w.down_proj, tokens,
+              ffn, hidden);
+    }
+    {
+      ProfileScope scope(&profiler_, "residual add", stream_);
+      launch_add_residual(x_, proj_out_, residual_elements, stream_);
+    }
 
     if (capture_activations_) {
       capture("layer_" + std::to_string(layer), x_, tokens, hidden);
     }
   }
 
-  launch_rmsnorm(normed_, x_, final_norm_, tokens, hidden, config_.rms_norm_eps,
-                 stream_);
+  {
+    ProfileScope scope(&profiler_, "final norm", stream_);
+    launch_rmsnorm(normed_, x_, final_norm_, tokens, hidden,
+                   config_.rms_norm_eps, stream_);
+  }
 
   if (capture_activations_) capture("final_norm", normed_, tokens, hidden);
 
@@ -409,8 +444,11 @@ void Model::run_layers(int tokens, int start_position) {
   // Projecting the whole prompt onto a 128k vocabulary would cost more than the
   // rest of prefill put together.
   const elem_t* last = normed_ + static_cast<int64_t>(tokens - 1) * hidden;
-  gemm_nt(cublas_, logits_, CUDA_R_32F, last, lm_head_, 1, hidden,
-          config_.vocab_size);
+  {
+    ProfileScope scope(&profiler_, "lm_head (GEMM)", stream_);
+    gemm_nt(cublas_, logits_, CUDA_R_32F, last, lm_head_, 1, hidden,
+            config_.vocab_size);
+  }
 }
 
 void Model::capture(const std::string& name, const elem_t* source, int tokens,
