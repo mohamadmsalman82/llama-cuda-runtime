@@ -61,6 +61,21 @@ struct ModelConfig {
   std::string summary() const;
 };
 
+// One weight tensor the runtime needs: the name it has in the checkpoint and
+// the shape it must have.
+struct WeightSpec {
+  std::string name;
+  std::vector<int64_t> shape;
+};
+
+// Every tensor the forward pass reads, in the order it is read. The loader
+// places them in a single device allocation in this order, so a decode step
+// walks the weights forward through memory rather than jumping around it.
+//
+// The output head is not here: it is lm_head.weight when the checkpoint has
+// one, and the embedding matrix again when the config ties them.
+std::vector<WeightSpec> required_weights(const ModelConfig& config);
+
 // Per-pair inverse frequencies for RoPE, length head_dim/2, with Llama 3
 // frequency scaling applied when the config asks for it. Computed on the host
 // once at load and uploaded, so the rotary kernel is a table lookup rather than

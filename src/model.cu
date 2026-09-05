@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <unordered_map>
 
 #include "cuda_utils.cuh"
 #include "kernels.cuh"
@@ -109,17 +110,36 @@ Model::~Model() {
 }
 
 void Model::load_weights(const SafetensorsArchive& archive) {
+  layers_.assign(static_cast<size_t>(config_.num_layers), LayerWeights{});
+
+  // Where each named tensor ends up once it is on the device. The names and
+  // shapes themselves come from required_weights(), so the loader and
+  // lcr-inspect can never disagree about what a checkpoint has to contain.
+  std::unordered_map<std::string, const elem_t**> destinations;
+  destinations["model.embed_tokens.weight"] = &embedding_;
+  destinations["model.norm.weight"] = &final_norm_;
+  for (int i = 0; i < config_.num_layers; ++i) {
+    LayerWeights& w = layers_[static_cast<size_t>(i)];
+    destinations[layer_key(i, "input_layernorm.weight")] = &w.input_norm;
+    destinations[layer_key(i, "self_attn.q_proj.weight")] = &w.q_proj;
+    destinations[layer_key(i, "self_attn.k_proj.weight")] = &w.k_proj;
+    destinations[layer_key(i, "self_attn.v_proj.weight")] = &w.v_proj;
+    destinations[layer_key(i, "self_attn.o_proj.weight")] = &w.o_proj;
+    destinations[layer_key(i, "post_attention_layernorm.weight")] =
+        &w.post_attention_norm;
+    destinations[layer_key(i, "mlp.gate_proj.weight")] = &w.gate_proj;
+    destinations[layer_key(i, "mlp.up_proj.weight")] = &w.up_proj;
+    destinations[layer_key(i, "mlp.down_proj.weight")] = &w.down_proj;
+  }
+
   struct Placement {
     const TensorView* tensor;
     const elem_t** destination;
   };
-
-  layers_.assign(static_cast<size_t>(config_.num_layers), LayerWeights{});
   std::vector<Placement> plan;
 
-  auto require = [&](const std::string& name,
-                     std::initializer_list<int64_t> shape,
-                     const elem_t** destination) {
+  auto take = [&](const std::string& name, const std::vector<int64_t>& shape,
+                  const elem_t** destination) {
     const TensorView& tensor = archive.get(name);
     LCR_CHECK(tensor.dtype == kElemDType,
               "tensor \"" << name << "\" is " << dtype_name(tensor.dtype)
@@ -130,32 +150,13 @@ void Model::load_weights(const SafetensorsArchive& archive) {
     plan.push_back({&tensor, destination});
   };
 
-  const int hidden = config_.hidden_size;
-  const int ffn = config_.intermediate_size;
-
-  require("model.embed_tokens.weight", {config_.vocab_size, hidden}, &embedding_);
-  for (int i = 0; i < config_.num_layers; ++i) {
-    LayerWeights& w = layers_[static_cast<size_t>(i)];
-    require(layer_key(i, "input_layernorm.weight"), {hidden}, &w.input_norm);
-    require(layer_key(i, "self_attn.q_proj.weight"), {config_.q_dim(), hidden},
-            &w.q_proj);
-    require(layer_key(i, "self_attn.k_proj.weight"), {config_.kv_dim(), hidden},
-            &w.k_proj);
-    require(layer_key(i, "self_attn.v_proj.weight"), {config_.kv_dim(), hidden},
-            &w.v_proj);
-    require(layer_key(i, "self_attn.o_proj.weight"), {hidden, config_.q_dim()},
-            &w.o_proj);
-    require(layer_key(i, "post_attention_layernorm.weight"), {hidden},
-            &w.post_attention_norm);
-    require(layer_key(i, "mlp.gate_proj.weight"), {ffn, hidden}, &w.gate_proj);
-    require(layer_key(i, "mlp.up_proj.weight"), {ffn, hidden}, &w.up_proj);
-    require(layer_key(i, "mlp.down_proj.weight"), {hidden, ffn}, &w.down_proj);
+  for (const WeightSpec& spec : required_weights(config_)) {
+    take(spec.name, spec.shape, destinations.at(spec.name));
   }
-  require("model.norm.weight", {hidden}, &final_norm_);
 
   const bool has_lm_head = archive.has("lm_head.weight");
   if (has_lm_head) {
-    require("lm_head.weight", {config_.vocab_size, hidden}, &lm_head_);
+    take("lm_head.weight", {config_.vocab_size, config_.hidden_size}, &lm_head_);
   } else {
     LCR_CHECK(config_.tie_word_embeddings,
               "the checkpoint has no lm_head.weight and config.json does not "
@@ -181,8 +182,8 @@ void Model::load_weights(const SafetensorsArchive& archive) {
   }
 
   // Tied embeddings: the output head is the embedding matrix, read a second
-  // time rather than stored a second time. That is 525 MB saved on this model,
-  // and it is also 525 MB the decode step still has to stream every token.
+  // time rather than stored a second time. That is 525 MB not stored, and it is
+  // also 525 MB the decode step still has to stream every token.
   if (!has_lm_head) lm_head_ = embedding_;
 }
 
@@ -219,7 +220,7 @@ void Model::allocate_arena() {
                       ? static_cast<size_t>(config_.num_kv_heads) *
                             options_.max_seq * config_.head_dim * e
                       : 0;
-  plan.ids = static_cast<size_t>(tokens + 1) * sizeof(int32_t);
+  plan.ids = static_cast<size_t>(tokens) * sizeof(int32_t);
 
   const size_t sizes[] = {
       plan.residual,          // x_
@@ -240,7 +241,8 @@ void Model::allocate_arena() {
       plan.attention_scratch, // attention_scratch_
       plan.gathered,          // gathered_keys_
       plan.gathered,          // gathered_values_
-      plan.ids,               // token_ids_ and sampled_id_
+      plan.ids,               // token_ids_
+      sizeof(int32_t),        // sampled_id_
   };
   size_t total = 0;
   for (size_t size : sizes) total = align_up(total, 256) + size;

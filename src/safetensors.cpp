@@ -68,6 +68,10 @@ std::string TensorView::shape_string() const {
 }
 
 void TensorView::expect_shape(std::initializer_list<int64_t> expected) const {
+  expect_shape(std::vector<int64_t>(expected));
+}
+
+void TensorView::expect_shape(const std::vector<int64_t>& expected) const {
   bool ok = expected.size() == shape.size();
   if (ok) {
     size_t i = 0;

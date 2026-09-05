@@ -35,6 +35,7 @@ struct TensorView {
   // by the weight loader so a mismatched checkpoint fails with a useful message
   // instead of a silent out-of-bounds read on the GPU.
   void expect_shape(std::initializer_list<int64_t> expected) const;
+  void expect_shape(const std::vector<int64_t>& expected) const;
 };
 
 // One memory-mapped safetensors file.

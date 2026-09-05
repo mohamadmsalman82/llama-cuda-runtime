@@ -54,6 +54,9 @@ target_compile_options(lcr_host PRIVATE
 add_executable(lcr-tokenize tools/tokenize_main.cpp)
 target_link_libraries(lcr-tokenize PRIVATE lcr_host)
 
+add_executable(lcr-inspect tools/inspect_main.cpp)
+target_link_libraries(lcr-inspect PRIVATE lcr_host)
+
 # ---------------------------------------------------------------------------
 # CUDA half of the build. Optional: without nvcc the host targets still build.
 # ---------------------------------------------------------------------------

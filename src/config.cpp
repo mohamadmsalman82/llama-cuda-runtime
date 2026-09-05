@@ -194,6 +194,32 @@ std::string ModelConfig::summary() const {
   return oss.str();
 }
 
+std::vector<WeightSpec> required_weights(const ModelConfig& config) {
+  const int64_t hidden = config.hidden_size;
+  const int64_t ffn = config.intermediate_size;
+  const int64_t q_dim = config.q_dim();
+  const int64_t kv_dim = config.kv_dim();
+
+  std::vector<WeightSpec> specs;
+  specs.reserve(static_cast<size_t>(config.num_layers) * 9 + 2);
+  specs.push_back({"model.embed_tokens.weight", {config.vocab_size, hidden}});
+
+  for (int layer = 0; layer < config.num_layers; ++layer) {
+    const std::string prefix = "model.layers." + std::to_string(layer) + ".";
+    specs.push_back({prefix + "input_layernorm.weight", {hidden}});
+    specs.push_back({prefix + "self_attn.q_proj.weight", {q_dim, hidden}});
+    specs.push_back({prefix + "self_attn.k_proj.weight", {kv_dim, hidden}});
+    specs.push_back({prefix + "self_attn.v_proj.weight", {kv_dim, hidden}});
+    specs.push_back({prefix + "self_attn.o_proj.weight", {hidden, q_dim}});
+    specs.push_back({prefix + "post_attention_layernorm.weight", {hidden}});
+    specs.push_back({prefix + "mlp.gate_proj.weight", {ffn, hidden}});
+    specs.push_back({prefix + "mlp.up_proj.weight", {ffn, hidden}});
+    specs.push_back({prefix + "mlp.down_proj.weight", {hidden, ffn}});
+  }
+  specs.push_back({"model.norm.weight", {hidden}});
+  return specs;
+}
+
 std::vector<float> compute_rope_inv_freq(const ModelConfig& config) {
   const int pairs = config.head_dim / 2;
   std::vector<float> inv_freq(static_cast<size_t>(pairs));
