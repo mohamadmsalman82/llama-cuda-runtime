@@ -43,6 +43,8 @@ add_library(lcr_host STATIC
   src/common.cpp
   src/config.cpp
   src/safetensors.cpp
+  src/tokenizer.cpp
+  src/unicode_data.cpp
 )
 target_include_directories(lcr_host PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lcr_host PUBLIC lcr_json)
@@ -105,3 +107,4 @@ endfunction()
 
 lcr_add_host_test(test_safetensors)
 lcr_add_host_test(test_config)
+lcr_add_host_test(test_tokenizer)
