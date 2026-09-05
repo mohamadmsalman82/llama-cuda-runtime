@@ -33,13 +33,14 @@ constexpr int kBlock = 64;
 __global__ void rope_q_kernel(elem_t* __restrict__ q_heads,
                               const elem_t* __restrict__ q_proj,
                               const float* __restrict__ inv_freq, int tokens,
-                              int start_position, int num_heads, int head_dim) {
+                              int start_position, int num_heads, int head_dim,
+                              int src_row_stride) {
   const int token = blockIdx.x;
   const int head = blockIdx.y;
   const int half = head_dim / 2;
   const float position = static_cast<float>(start_position + token);
 
-  const int64_t src = static_cast<int64_t>(token) * num_heads * head_dim +
+  const int64_t src = static_cast<int64_t>(token) * src_row_stride +
                       static_cast<int64_t>(head) * head_dim;
   const int64_t dst =
       (static_cast<int64_t>(head) * tokens + token) * head_dim;
@@ -59,14 +60,15 @@ __global__ void rope_write_kv_kernel(KvCacheView view,
                                      const elem_t* __restrict__ k_proj,
                                      const elem_t* __restrict__ v_proj,
                                      const float* __restrict__ inv_freq,
-                                     int tokens, int start_position) {
+                                     int tokens, int start_position,
+                                     int src_row_stride) {
   const int token = blockIdx.x;
   const int head = blockIdx.y;
   const int head_dim = view.head_dim;
   const int half = head_dim / 2;
   const int position = start_position + token;
 
-  const int64_t src = static_cast<int64_t>(token) * view.num_kv_heads * head_dim +
+  const int64_t src = static_cast<int64_t>(token) * src_row_stride +
                       static_cast<int64_t>(head) * head_dim;
   const size_t dst = view.offset<kPaged>(head, position);
 
@@ -88,30 +90,31 @@ __global__ void rope_write_kv_kernel(KvCacheView view,
 
 void launch_rope_q(elem_t* q_heads, const elem_t* q_proj, const float* inv_freq,
                    int tokens, int start_position, int num_heads, int head_dim,
-                   cudaStream_t stream) {
+                   int src_row_stride, cudaStream_t stream) {
   if (tokens == 0) return;
   const dim3 grid(static_cast<unsigned>(tokens),
                   static_cast<unsigned>(num_heads));
   const int block = std::min(kBlock, ((head_dim / 2 + 31) / 32) * 32);
   rope_q_kernel<<<grid, block, 0, stream>>>(q_heads, q_proj, inv_freq, tokens,
-                                            start_position, num_heads, head_dim);
+                                            start_position, num_heads, head_dim,
+                                            src_row_stride);
   CUDA_CHECK_LAUNCH();
 }
 
 void launch_rope_write_kv(const KvCacheView& view, const elem_t* k_proj,
                           const elem_t* v_proj, const float* inv_freq,
                           int tokens, int start_position, bool paged,
-                          cudaStream_t stream) {
+                          int src_row_stride, cudaStream_t stream) {
   if (tokens == 0) return;
   const dim3 grid(static_cast<unsigned>(tokens),
                   static_cast<unsigned>(view.num_kv_heads));
   const int block = std::min(kBlock, ((view.head_dim + 31) / 32) * 32);
   if (paged) {
     rope_write_kv_kernel<true><<<grid, block, 0, stream>>>(
-        view, k_proj, v_proj, inv_freq, tokens, start_position);
+        view, k_proj, v_proj, inv_freq, tokens, start_position, src_row_stride);
   } else {
     rope_write_kv_kernel<false><<<grid, block, 0, stream>>>(
-        view, k_proj, v_proj, inv_freq, tokens, start_position);
+        view, k_proj, v_proj, inv_freq, tokens, start_position, src_row_stride);
   }
   CUDA_CHECK_LAUNCH();
 }

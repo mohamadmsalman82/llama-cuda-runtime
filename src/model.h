@@ -28,13 +28,17 @@ namespace lcr {
 
 struct LayerWeights {
   const elem_t* input_norm = nullptr;          // [hidden]
-  const elem_t* q_proj = nullptr;              // [num_heads * head_dim, hidden]
-  const elem_t* k_proj = nullptr;              // [num_kv_heads * head_dim, hidden]
-  const elem_t* v_proj = nullptr;              // [num_kv_heads * head_dim, hidden]
+  // Q, K and V stacked into one [q_dim + 2 * kv_dim, hidden] matrix, and gate
+  // and up stacked into one [2 * intermediate, hidden]. The checkpoint stores
+  // them separately, but they are all applied to the same input vector, so
+  // running them as one GEMM reads that input once instead of three times and
+  // gives cuBLAS a matrix with enough rows to work with. The profile showed the
+  // three separate QKV calls reaching only 57% of peak bandwidth against 93%
+  // for the largest single GEMM, which is what motivated this.
+  const elem_t* qkv_proj = nullptr;
   const elem_t* o_proj = nullptr;              // [hidden, num_heads * head_dim]
   const elem_t* post_attention_norm = nullptr; // [hidden]
-  const elem_t* gate_proj = nullptr;           // [intermediate, hidden]
-  const elem_t* up_proj = nullptr;             // [intermediate, hidden]
+  const elem_t* gate_up_proj = nullptr;
   const elem_t* down_proj = nullptr;           // [hidden, intermediate]
 };
 
@@ -155,15 +159,16 @@ class Model {
   // Persistent activation buffers, carved out of the arena once.
   elem_t* x_ = nullptr;          // residual stream  [max_tokens][hidden]
   elem_t* normed_ = nullptr;     // [max_tokens][hidden]
-  elem_t* q_proj_ = nullptr;     // [max_tokens][num_heads * head_dim]
-  elem_t* k_proj_ = nullptr;     // [max_tokens][num_kv_heads * head_dim]
-  elem_t* v_proj_ = nullptr;
+  // One buffer holding Q, K and V side by side per token, which is what the
+  // fused projection writes. Q starts at column 0, K at q_dim, V at
+  // q_dim + kv_dim.
+  elem_t* qkv_ = nullptr;        // [max_tokens][q_dim + 2 * kv_dim]
   elem_t* q_heads_ = nullptr;    // [num_heads][max_tokens][head_dim]
   elem_t* attn_heads_ = nullptr; // [num_heads][max_tokens][head_dim]
   elem_t* attn_out_ = nullptr;   // [max_tokens][num_heads * head_dim]
   elem_t* proj_out_ = nullptr;   // [max_tokens][hidden]
-  elem_t* gate_ = nullptr;       // [max_tokens][intermediate]
-  elem_t* up_ = nullptr;
+  // Gate and up side by side, from the fused MLP projection.
+  elem_t* gate_up_ = nullptr;    // [max_tokens][2 * intermediate]
   elem_t* act_ = nullptr;
   float* scores_ = nullptr;      // [num_heads][chunk][max_seq]
   elem_t* probs_ = nullptr;

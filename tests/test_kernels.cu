@@ -249,7 +249,7 @@ void test_rope_query() {
   dq.upload(q);
   dfreq.upload(inv_freq);
   lcr::launch_rope_q(dout.get(), dq.get(), dfreq.get(), tokens, start, heads,
-                     head_dim, nullptr);
+                     head_dim, heads * head_dim, nullptr);
   CUDA_CHECK(cudaDeviceSynchronize());
   expect_close("rope_q", to_floats(dout.download()), expected);
 }
@@ -334,7 +334,7 @@ void fill_cache(lcr::KvCache* cache, const std::vector<elem_t>& keys,
 
   cache->reserve_length(positions);
   lcr::launch_rope_write_kv(cache->view(0), dk.get(), dv.get(), dfreq.get(),
-                            positions, 0, paged, nullptr);
+                            positions, 0, paged, kv_dim, nullptr);
   CUDA_CHECK(cudaDeviceSynchronize());
 }
 

@@ -112,34 +112,23 @@ Model::~Model() {
 void Model::load_weights(const SafetensorsArchive& archive) {
   layers_.assign(static_cast<size_t>(config_.num_layers), LayerWeights{});
 
-  // Where each named tensor ends up once it is on the device. The names and
-  // shapes themselves come from required_weights(), so the loader and
-  // lcr-inspect can never disagree about what a checkpoint has to contain.
-  std::unordered_map<std::string, const elem_t**> destinations;
-  destinations["model.embed_tokens.weight"] = &embedding_;
-  destinations["model.norm.weight"] = &final_norm_;
-  for (int i = 0; i < config_.num_layers; ++i) {
-    LayerWeights& w = layers_[static_cast<size_t>(i)];
-    destinations[layer_key(i, "input_layernorm.weight")] = &w.input_norm;
-    destinations[layer_key(i, "self_attn.q_proj.weight")] = &w.q_proj;
-    destinations[layer_key(i, "self_attn.k_proj.weight")] = &w.k_proj;
-    destinations[layer_key(i, "self_attn.v_proj.weight")] = &w.v_proj;
-    destinations[layer_key(i, "self_attn.o_proj.weight")] = &w.o_proj;
-    destinations[layer_key(i, "post_attention_layernorm.weight")] =
-        &w.post_attention_norm;
-    destinations[layer_key(i, "mlp.gate_proj.weight")] = &w.gate_proj;
-    destinations[layer_key(i, "mlp.up_proj.weight")] = &w.up_proj;
-    destinations[layer_key(i, "mlp.down_proj.weight")] = &w.down_proj;
-  }
-
-  struct Placement {
+  // Q, K, V are applied to the same vector, and so are gate and up, so each
+  // group is concatenated into one matrix at load time and run as a single
+  // GEMM. Concatenation along the output dimension is exactly a row-wise
+  // append, because the weights are row-major [out_features, in_features], so
+  // it is three contiguous copies with no reordering.
+  struct Piece {
     const TensorView* tensor;
-    const elem_t** destination;
+    size_t offset;  // byte offset within the destination block
   };
-  std::vector<Placement> plan;
+  struct Block {
+    const elem_t** destination;
+    std::vector<Piece> pieces;
+    size_t bytes = 0;
+  };
+  std::vector<Block> blocks;
 
-  auto take = [&](const std::string& name, const std::vector<int64_t>& shape,
-                  const elem_t** destination) {
+  auto check = [&](const std::string& name, const std::vector<int64_t>& shape) {
     const TensorView& tensor = archive.get(name);
     LCR_CHECK(tensor.dtype == kElemDType,
               "tensor \"" << name << "\" is " << dtype_name(tensor.dtype)
@@ -147,38 +136,74 @@ void Model::load_weights(const SafetensorsArchive& archive) {
                           << "; rebuild with -DLCR_DTYPE="
                           << (kElemDType == DType::kBF16 ? "fp16" : "bf16"));
     tensor.expect_shape(shape);
-    plan.push_back({&tensor, destination});
+    return &tensor;
   };
 
-  for (const WeightSpec& spec : required_weights(config_)) {
-    take(spec.name, spec.shape, destinations.at(spec.name));
+  auto add_block = [&](const elem_t** destination,
+                       std::vector<const TensorView*> tensors) {
+    Block block;
+    block.destination = destination;
+    for (const TensorView* tensor : tensors) {
+      block.pieces.push_back({tensor, block.bytes});
+      block.bytes += tensor->nbytes;
+    }
+    blocks.push_back(std::move(block));
+  };
+
+  const int64_t hidden = config_.hidden_size;
+  const int64_t ffn = config_.intermediate_size;
+  const int64_t q_dim = config_.q_dim();
+  const int64_t kv_dim = config_.kv_dim();
+
+  add_block(&embedding_,
+            {check("model.embed_tokens.weight", {config_.vocab_size, hidden})});
+
+  for (int i = 0; i < config_.num_layers; ++i) {
+    LayerWeights& w = layers_[static_cast<size_t>(i)];
+    const std::string p = "model.layers." + std::to_string(i) + ".";
+    add_block(&w.input_norm, {check(p + "input_layernorm.weight", {hidden})});
+    add_block(&w.qkv_proj, {check(p + "self_attn.q_proj.weight", {q_dim, hidden}),
+                            check(p + "self_attn.k_proj.weight", {kv_dim, hidden}),
+                            check(p + "self_attn.v_proj.weight", {kv_dim, hidden})});
+    add_block(&w.o_proj, {check(p + "self_attn.o_proj.weight", {hidden, q_dim})});
+    add_block(&w.post_attention_norm,
+              {check(p + "post_attention_layernorm.weight", {hidden})});
+    add_block(&w.gate_up_proj, {check(p + "mlp.gate_proj.weight", {ffn, hidden}),
+                                check(p + "mlp.up_proj.weight", {ffn, hidden})});
+    add_block(&w.down_proj, {check(p + "mlp.down_proj.weight", {hidden, ffn})});
   }
+  add_block(&final_norm_, {check("model.norm.weight", {hidden})});
 
   const bool has_lm_head = archive.has("lm_head.weight");
   if (has_lm_head) {
-    take("lm_head.weight", {config_.vocab_size, config_.hidden_size}, &lm_head_);
+    add_block(&lm_head_,
+              {check("lm_head.weight", {config_.vocab_size, hidden})});
   } else {
     LCR_CHECK(config_.tie_word_embeddings,
               "the checkpoint has no lm_head.weight and config.json does not "
               "say the embeddings are tied");
   }
 
-  // One allocation for the whole model, laid out in the order above.
+  // One allocation for the whole model, in the order the forward pass reads it,
+  // so a decode step walks memory forward instead of jumping between 146
+  // separate allocations.
   size_t total = 0;
-  for (const Placement& item : plan) {
-    total = align_up(total, 256) + item.tensor->nbytes;
+  for (const Block& block : blocks) {
+    total = align_up(total, 256) + block.bytes;
   }
   CUDA_CHECK(cudaMalloc(&weight_block_, total));
   weight_bytes_ = total;
 
   size_t offset = 0;
-  for (const Placement& item : plan) {
+  for (const Block& block : blocks) {
     offset = align_up(offset, 256);
-    char* destination = reinterpret_cast<char*>(weight_block_) + offset;
-    CUDA_CHECK(cudaMemcpy(destination, item.tensor->data, item.tensor->nbytes,
-                          cudaMemcpyHostToDevice));
-    *item.destination = reinterpret_cast<const elem_t*>(destination);
-    offset += item.tensor->nbytes;
+    char* base = reinterpret_cast<char*>(weight_block_) + offset;
+    for (const Piece& piece : block.pieces) {
+      CUDA_CHECK(cudaMemcpy(base + piece.offset, piece.tensor->data,
+                            piece.tensor->nbytes, cudaMemcpyHostToDevice));
+    }
+    *block.destination = reinterpret_cast<const elem_t*>(base);
+    offset += block.bytes;
   }
 
   // Tied embeddings: the output head is the embedding matrix, read a second
@@ -201,14 +226,18 @@ void Model::allocate_arena() {
   // Sizes are named once and used both to reserve the block and to carve it
   // up, so the two can never drift apart.
   struct Plan {
-    size_t residual, projections, q_dim_buffer, kv_buffer, ffn_buffer;
+    size_t residual, projections, q_dim_buffer, qkv_buffer, ffn_buffer;
+    size_t gate_up_buffer;
     size_t scores, probs, logits, attention_scratch, gathered, ids;
   } plan;
   plan.residual = static_cast<size_t>(tokens) * hidden * e;
   plan.projections = plan.residual;
   plan.q_dim_buffer = static_cast<size_t>(tokens) * config_.q_dim() * e;
-  plan.kv_buffer = static_cast<size_t>(tokens) * config_.kv_dim() * e;
+  // Q, K and V side by side, which is what the fused projection writes.
+  plan.qkv_buffer =
+      static_cast<size_t>(tokens) * (config_.q_dim() + 2 * config_.kv_dim()) * e;
   plan.ffn_buffer = static_cast<size_t>(tokens) * ffn * e;
+  plan.gate_up_buffer = static_cast<size_t>(tokens) * 2 * ffn * e;
   plan.scores = static_cast<size_t>(heads) * tokens * options_.max_seq * sizeof(float);
   plan.probs = static_cast<size_t>(heads) * tokens * options_.max_seq * e;
   plan.logits = static_cast<size_t>(config_.vocab_size) * sizeof(float);
@@ -226,14 +255,11 @@ void Model::allocate_arena() {
       plan.residual,          // x_
       plan.residual,          // normed_
       plan.projections,       // proj_out_
-      plan.q_dim_buffer,      // q_proj_
-      plan.kv_buffer,         // k_proj_
-      plan.kv_buffer,         // v_proj_
+      plan.qkv_buffer,        // qkv_
       plan.q_dim_buffer,      // q_heads_
       plan.q_dim_buffer,      // attn_heads_
       plan.q_dim_buffer,      // attn_out_
-      plan.ffn_buffer,        // gate_
-      plan.ffn_buffer,        // up_
+      plan.gate_up_buffer,    // gate_up_
       plan.ffn_buffer,        // act_
       plan.scores,            // scores_
       plan.probs,             // probs_
@@ -251,14 +277,11 @@ void Model::allocate_arena() {
   x_ = arena_.alloc<elem_t>(plan.residual / e);
   normed_ = arena_.alloc<elem_t>(plan.residual / e);
   proj_out_ = arena_.alloc<elem_t>(plan.projections / e);
-  q_proj_ = arena_.alloc<elem_t>(plan.q_dim_buffer / e);
-  k_proj_ = arena_.alloc<elem_t>(plan.kv_buffer / e);
-  v_proj_ = arena_.alloc<elem_t>(plan.kv_buffer / e);
+  qkv_ = arena_.alloc<elem_t>(plan.qkv_buffer / e);
   q_heads_ = arena_.alloc<elem_t>(plan.q_dim_buffer / e);
   attn_heads_ = arena_.alloc<elem_t>(plan.q_dim_buffer / e);
   attn_out_ = arena_.alloc<elem_t>(plan.q_dim_buffer / e);
-  gate_ = arena_.alloc<elem_t>(plan.ffn_buffer / e);
-  up_ = arena_.alloc<elem_t>(plan.ffn_buffer / e);
+  gate_up_ = arena_.alloc<elem_t>(plan.gate_up_buffer / e);
   act_ = arena_.alloc<elem_t>(plan.ffn_buffer / e);
   scores_ = arena_.alloc<float>(plan.scores / sizeof(float));
   probs_ = arena_.alloc<elem_t>(plan.probs / e);
@@ -363,24 +386,25 @@ void Model::run_layers(int tokens, int start_position) {
       launch_rmsnorm(normed_, x_, w.input_norm, tokens, hidden,
                      config_.rms_norm_eps, stream_);
     }
+    const int qkv_stride = config_.q_dim() + 2 * config_.kv_dim();
     {
-      ProfileScope scope(&profiler_, "qkv_proj (3 GEMM)", stream_);
-      gemm_nt(cublas_, q_proj_, kCublasElemType, normed_, w.q_proj, tokens,
-              hidden, config_.q_dim());
-      gemm_nt(cublas_, k_proj_, kCublasElemType, normed_, w.k_proj, tokens,
-              hidden, config_.kv_dim());
-      gemm_nt(cublas_, v_proj_, kCublasElemType, normed_, w.v_proj, tokens,
-              hidden, config_.kv_dim());
+      ProfileScope scope(&profiler_, "qkv_proj (fused GEMM)", stream_);
+      gemm_nt(cublas_, qkv_, kCublasElemType, normed_, w.qkv_proj, tokens,
+              hidden, qkv_stride);
     }
 
     const KvCacheView view = kv_cache_->view(layer);
     {
       ProfileScope scope(&profiler_, "rope + kv write", stream_);
-      launch_rope_q(q_heads_, q_proj_, inv_freq_, tokens, start_position,
-                    config_.num_heads, config_.head_dim, stream_);
-      launch_rope_write_kv(view, k_proj_, v_proj_, inv_freq_, tokens,
-                           start_position,
-                           options_.kv_layout == KvLayout::kPaged, stream_);
+      // Q, K and V are columns of one row now, so each is a fixed offset into
+      // the fused buffer with the full row width as its stride.
+      launch_rope_q(q_heads_, qkv_, inv_freq_, tokens, start_position,
+                    config_.num_heads, config_.head_dim, qkv_stride, stream_);
+      launch_rope_write_kv(view, qkv_ + config_.q_dim(),
+                           qkv_ + config_.q_dim() + config_.kv_dim(), inv_freq_,
+                           tokens, start_position,
+                           options_.kv_layout == KvLayout::kPaged, qkv_stride,
+                           stream_);
     }
     {
       ProfileScope scope(&profiler_, "attention", stream_);
@@ -405,16 +429,14 @@ void Model::run_layers(int tokens, int start_position) {
                      config_.rms_norm_eps, stream_);
     }
     {
-      ProfileScope scope(&profiler_, "mlp up/gate (2 GEMM)", stream_);
-      gemm_nt(cublas_, gate_, kCublasElemType, normed_, w.gate_proj, tokens,
-              hidden, ffn);
-      gemm_nt(cublas_, up_, kCublasElemType, normed_, w.up_proj, tokens, hidden,
-              ffn);
+      ProfileScope scope(&profiler_, "mlp gate/up (fused GEMM)", stream_);
+      gemm_nt(cublas_, gate_up_, kCublasElemType, normed_, w.gate_up_proj,
+              tokens, hidden, 2 * ffn);
     }
     {
       ProfileScope scope(&profiler_, "swiglu", stream_);
-      launch_swiglu(act_, gate_, up_, static_cast<int64_t>(tokens) * ffn,
-                    stream_);
+      launch_swiglu_strided(act_, gate_up_, gate_up_ + ffn, tokens, ffn,
+                            2 * ffn, stream_);
     }
     {
       ProfileScope scope(&profiler_, "mlp down (GEMM)", stream_);

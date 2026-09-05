@@ -90,6 +90,36 @@ __global__ void swiglu_kernel(elem_t* __restrict__ out,
   }
 }
 
+// Gate and up live in one row, `src_row_stride` apart in column terms, so each
+// token reads two slices of the same row. One block per token keeps both slices
+// in the same L2 lines.
+__global__ void swiglu_strided_kernel(elem_t* __restrict__ out,
+                                      const elem_t* __restrict__ gate,
+                                      const elem_t* __restrict__ up, int width,
+                                      int src_row_stride) {
+  const int token = blockIdx.x;
+  const int64_t src = static_cast<int64_t>(token) * src_row_stride;
+  const int64_t dst = static_cast<int64_t>(token) * width;
+  const int vecs = width / 8;
+
+  for (int i = threadIdx.x; i < vecs; i += blockDim.x) {
+    const ElemVec8 g = reinterpret_cast<const ElemVec8*>(gate + src)[i];
+    const ElemVec8 u = reinterpret_cast<const ElemVec8*>(up + src)[i];
+    ElemVec8 result;
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      result.v[j] =
+          float_to_elem(silu(elem_to_float(g.v[j])) * elem_to_float(u.v[j]));
+    }
+    reinterpret_cast<ElemVec8*>(out + dst)[i] = result;
+  }
+  for (int i = vecs * 8 + threadIdx.x; i < width; i += blockDim.x) {
+    out[dst + i] =
+        float_to_elem(silu(elem_to_float(gate[src + i])) *
+                      elem_to_float(up[src + i]));
+  }
+}
+
 // heads[h][t][d] -> out[t][h * head_dim + d]
 __global__ void merge_heads_kernel(elem_t* __restrict__ out,
                                    const elem_t* __restrict__ heads, int tokens,
@@ -135,6 +165,15 @@ void launch_swiglu(elem_t* out, const elem_t* gate, const elem_t* up,
   if (count == 0) return;
   swiglu_kernel<<<grid_for(count / 8 + 1), kBlock, 0, stream>>>(out, gate, up,
                                                                 count);
+  CUDA_CHECK_LAUNCH();
+}
+
+void launch_swiglu_strided(elem_t* out, const elem_t* gate, const elem_t* up,
+                           int tokens, int width, int src_row_stride,
+                           cudaStream_t stream) {
+  if (tokens == 0) return;
+  swiglu_strided_kernel<<<tokens, kBlock, 0, stream>>>(out, gate, up, width,
+                                                       src_row_stride);
   CUDA_CHECK_LAUNCH();
 }
 

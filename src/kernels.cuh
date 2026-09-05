@@ -32,15 +32,24 @@ void launch_add_residual(elem_t* x, const elem_t* delta, int64_t count,
 void launch_swiglu(elem_t* out, const elem_t* gate, const elem_t* up,
                    int64_t count, cudaStream_t stream);
 
+// Same, when gate and up are two halves of one fused row rather than separate
+// buffers. `src_row_stride` is the full row width, twice `width`.
+void launch_swiglu_strided(elem_t* out, const elem_t* gate, const elem_t* up,
+                           int tokens, int width, int src_row_stride,
+                           cudaStream_t stream);
+
 // Rotary position embedding on the query projection, fused with the transpose
 // into head-major order.
 //   in:  q_proj    [tokens][num_heads * head_dim]
 //   out: q_heads   [num_heads][tokens][head_dim]
 // Head-major is what the prefill attention GEMM wants, and doing the transpose
 // here costs nothing because the kernel is already touching every element.
+// `src_row_stride` is the distance between consecutive tokens in q_proj. It
+// differs from num_heads * head_dim when the query comes out of a fused QKV
+// projection, where one row holds Q, K and V side by side.
 void launch_rope_q(elem_t* q_heads, const elem_t* q_proj, const float* inv_freq,
                    int tokens, int start_position, int num_heads, int head_dim,
-                   cudaStream_t stream);
+                   int src_row_stride, cudaStream_t stream);
 
 // Rotary embedding on the key projection and the copy of both key and value
 // into the cache, in one pass.
@@ -48,7 +57,7 @@ void launch_rope_q(elem_t* q_heads, const elem_t* q_proj, const float* inv_freq,
 void launch_rope_write_kv(const KvCacheView& view, const elem_t* k_proj,
                           const elem_t* v_proj, const float* inv_freq,
                           int tokens, int start_position, bool paged,
-                          cudaStream_t stream);
+                          int src_row_stride, cudaStream_t stream);
 
 // Causal softmax over prefill attention scores, in fp32, writing bf16/fp16
 // probabilities for the second GEMM.
