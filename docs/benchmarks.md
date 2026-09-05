@@ -3,7 +3,7 @@
 RTX 4090 (sm_89, 128 SMs, 384-bit bus, 1008.1 GB/s theoretical peak), CUDA 12.4,
 Llama-3.2-1B-Instruct in bf16. 27-token prompt, 256 tokens generated, greedy.
 
-Measured 2026-09-05, before any optimization pass. Reproduce with:
+Measured 2026-09-05. Reproduce with:
 
 ```
 python3 tools/benchmark.py --model models/Llama-3.2-1B-Instruct --tokens 256
@@ -13,8 +13,13 @@ python3 tools/benchmark.py --model models/Llama-3.2-1B-Instruct --tokens 256
 
 | runtime | prefill tok/s | decode tok/s | ms/token | achieved GB/s | % of peak |
 |---|---:|---:|---:|---:|---:|
-| this runtime | 7151 | 309.0 | 3.236 | 765 | 75.9% |
+| this runtime, optimized | 7151 | 322.3 | 3.103 | 798 | 79.1% |
+| this runtime, baseline | 7151 | 309.0 | 3.236 | 765 | 75.9% |
 | HuggingFace Transformers | 1931 | 72.0 | 13.894 | 178 | 17.7% |
+
+The two rows for this runtime are before and after the optimization pass in
+[optimization.md](optimization.md), which fused the QKV and gate/up projections
+and folded each residual join into the norm that follows it.
 
 Decoding one token requires reading all 2.472 GB of weights out of HBM, so
 tokens/sec and achieved bandwidth are the same measurement in different units.

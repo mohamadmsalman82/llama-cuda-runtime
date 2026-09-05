@@ -37,7 +37,9 @@ SwiGLU, softmax, decode-phase attention, and sampling. cuBLAS does the matmuls.
       identical
 - [x] Benchmark table, bandwidth analysis, prefill/decode breakdown, KV cache
       comparison. See [docs/benchmarks.md](docs/benchmarks.md).
-- [ ] Profiling with Nsight, and the kernel optimization pass
+- [x] Per-stage profiling and the kernel optimization pass. See
+      [docs/optimization.md](docs/optimization.md).
+- [ ] CUDA graphs for the decode step, the largest remaining win
 - [ ] llama.cpp row in the benchmark table, which needs an f16 GGUF
 
 ## Results
@@ -46,7 +48,7 @@ RTX 4090, Llama-3.2-1B-Instruct in bf16, before any optimization:
 
 | runtime | decode tok/s | ms/token | achieved GB/s | % of peak |
 |---|---:|---:|---:|---:|
-| this runtime | 309.0 | 3.236 | 765 | **75.9%** |
+| this runtime | 322.3 | 3.103 | 798 | **79.1%** |
 | HuggingFace Transformers | 72.0 | 13.894 | 178 | 17.7% |
 
 Decoding one token means reading all 2.472 GB of weights out of HBM, so
