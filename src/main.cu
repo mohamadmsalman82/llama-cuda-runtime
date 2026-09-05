@@ -39,6 +39,11 @@ struct Args {
   // Overrides the peak bandwidth reported by the driver, which is wrong on
   // some parts. In GB/s.
   double peak_bandwidth_gb = 0.0;
+  // Timed runs discard this many passes first. Creating a cuBLAS handle,
+  // loading kernel images, and letting cuBLAS pick its algorithms costs about
+  // 170 ms on first use, which is many times a real prefill and would
+  // otherwise be reported as prefill time.
+  int warmup = 0;
   bool quiet = false;
   bool json_output = false;
 };
@@ -66,6 +71,8 @@ struct Args {
       "  --device N             CUDA device index\n"
       "  --peak-bandwidth GB    override the theoretical peak used in the report\n"
       "  --bench                print timing and bandwidth after the text\n"
+      "  --warmup N             discard N passes before timing (default 1 with\n"
+      "                         --bench, 0 otherwise)\n"
       "  --json                 emit the benchmark report as JSON\n"
       "  --quiet                suppress the loading banner\n");
   std::exit(code);
@@ -78,6 +85,7 @@ std::string require_value(int argc, char** argv, int* i) {
 
 Args parse_args(int argc, char** argv) {
   Args args;
+  bool warmup_set = false;
   for (int i = 1; i < argc; ++i) {
     const std::string flag = argv[i];
     if (flag == "--model") args.model_dir = require_value(argc, argv, &i);
@@ -86,6 +94,7 @@ Args parse_args(int argc, char** argv) {
     else if (flag == "--chat") args.chat = true;
     else if (flag == "--bench") args.benchmark = true;
     else if (flag == "--json") { args.benchmark = true; args.json_output = true; }
+    else if (flag == "--warmup") { args.warmup = std::stoi(require_value(argc, argv, &i)); warmup_set = true; }
     else if (flag == "--quiet") args.quiet = true;
     else if (flag == "--paged") args.paged = true;
     else if (flag == "--max-tokens") args.max_new_tokens = std::stoi(require_value(argc, argv, &i));
@@ -109,6 +118,8 @@ Args parse_args(int argc, char** argv) {
     std::fprintf(stderr, "--model is required\n");
     usage(2);
   }
+  // Warming up only matters when the numbers are being reported.
+  if (!warmup_set && args.benchmark) args.warmup = 1;
   return args;
 }
 
@@ -363,6 +374,15 @@ int run(int argc, char** argv) {
             "prompt of " << prompt.size()
                          << " tokens does not fit in --max-seq "
                          << args.max_seq);
+
+  // Discarded passes, so the timed ones measure the model rather than CUDA
+  // context setup and cuBLAS algorithm selection. Both phases have to run:
+  // they go through different code, and each has its own first-call cost.
+  for (int i = 0; i < args.warmup; ++i) {
+    const float* warm = model.prefill(prompt);
+    model.decode(model.sample(warm, 0.0f, 0, 1.0f, 0.0f));
+    model.reset();
+  }
 
   Utf8Streamer streamer;
   if (!args.chat) streamer.feed(prompt_text);
