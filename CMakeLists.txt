@@ -100,6 +100,14 @@ if(CMAKE_CUDA_COMPILER)
   add_executable(llama-run src/main.cu)
   target_link_libraries(llama-run PRIVATE lcr_cuda)
 
+  add_executable(lcr-validate tools/validate_main.cu)
+  target_link_libraries(lcr-validate PRIVATE lcr_cuda)
+
+  add_executable(test_kernels tests/test_kernels.cu)
+  target_include_directories(test_kernels PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+  target_link_libraries(test_kernels PRIVATE lcr_cuda)
+  add_test(NAME test_kernels COMMAND test_kernels)
+
   message(STATUS "CUDA enabled, architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 else()
   message(STATUS "No CUDA compiler found. Building host targets only "

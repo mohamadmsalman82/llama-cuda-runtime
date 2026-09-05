@@ -277,8 +277,7 @@ void Model::allocate_arena() {
 
 void Model::reset() {
   position_ = 0;
-  debug_.layer_outputs.clear();
-  debug_.final_norm.clear();
+  taps_.clear();
 }
 
 const float* Model::prefill(const std::vector<int>& tokens) {
@@ -346,9 +345,10 @@ void Model::run_layers(int tokens, int start_position) {
   const int ffn = config_.intermediate_size;
   const int64_t residual_elements = static_cast<int64_t>(tokens) * hidden;
 
-  if (debug_.enabled) {
-    debug_.layer_outputs.clear();
-    debug_.layer_outputs.reserve(static_cast<size_t>(config_.num_layers));
+  if (capture_activations_) {
+    taps_.clear();
+    taps_.reserve(static_cast<size_t>(config_.num_layers) + 2);
+    capture("embed", x_, tokens, hidden);
   }
 
   for (int layer = 0; layer < config_.num_layers; ++layer) {
@@ -392,23 +392,15 @@ void Model::run_layers(int tokens, int start_position) {
             hidden);
     launch_add_residual(x_, proj_out_, residual_elements, stream_);
 
-    if (debug_.enabled) capture_layer_output(layer, tokens);
+    if (capture_activations_) {
+      capture("layer_" + std::to_string(layer), x_, tokens, hidden);
+    }
   }
 
   launch_rmsnorm(normed_, x_, final_norm_, tokens, hidden, config_.rms_norm_eps,
                  stream_);
 
-  if (debug_.enabled) {
-    debug_.final_norm.assign(static_cast<size_t>(residual_elements), 0.0f);
-    std::vector<elem_t> host(static_cast<size_t>(residual_elements));
-    CUDA_CHECK(cudaMemcpyAsync(host.data(), normed_,
-                               host.size() * sizeof(elem_t),
-                               cudaMemcpyDeviceToHost, stream_));
-    CUDA_CHECK(cudaStreamSynchronize(stream_));
-    for (size_t i = 0; i < host.size(); ++i) {
-      debug_.final_norm[i] = static_cast<float>(host[i]);
-    }
-  }
+  if (capture_activations_) capture("final_norm", normed_, tokens, hidden);
 
   // Only the last position's logits are ever used: during prefill to pick the
   // first generated token, during decode because there is only one position.
@@ -419,16 +411,23 @@ void Model::run_layers(int tokens, int start_position) {
           config_.vocab_size);
 }
 
-void Model::capture_layer_output(int layer, int tokens) {
-  const size_t count = static_cast<size_t>(tokens) * config_.hidden_size;
+void Model::capture(const std::string& name, const elem_t* source, int tokens,
+                    int width) {
+  const size_t count = static_cast<size_t>(tokens) * width;
   std::vector<elem_t> host(count);
-  CUDA_CHECK(cudaMemcpyAsync(host.data(), x_, count * sizeof(elem_t),
+  CUDA_CHECK(cudaMemcpyAsync(host.data(), source, count * sizeof(elem_t),
                              cudaMemcpyDeviceToHost, stream_));
   CUDA_CHECK(cudaStreamSynchronize(stream_));
-  std::vector<float> values(count);
-  for (size_t i = 0; i < count; ++i) values[i] = static_cast<float>(host[i]);
-  debug_.layer_outputs.push_back(std::move(values));
-  (void)layer;
+
+  Tap tap;
+  tap.name = name;
+  tap.tokens = tokens;
+  tap.width = width;
+  tap.values.resize(count);
+  for (size_t i = 0; i < count; ++i) {
+    tap.values[i] = static_cast<float>(host[i]);
+  }
+  taps_.push_back(std::move(tap));
 }
 
 // ---------------------------------------------------------------------------

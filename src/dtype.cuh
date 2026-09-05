@@ -27,8 +27,14 @@ using elem_t = __half;
 constexpr DType kElemDType = DType::kF16;
 constexpr const char* kElemName = "fp16";
 
-__device__ __forceinline__ float elem_to_float(elem_t x) { return __half2float(x); }
-__device__ __forceinline__ elem_t float_to_elem(float v) { return __float2half(v); }
+// Host-callable as well as device-callable: the activation capture used by the
+// reference comparison, and the kernel tests, both convert on the host.
+__host__ __device__ __forceinline__ float elem_to_float(elem_t x) {
+  return __half2float(x);
+}
+__host__ __device__ __forceinline__ elem_t float_to_elem(float v) {
+  return __float2half(v);
+}
 
 #else
 
@@ -36,10 +42,12 @@ using elem_t = __nv_bfloat16;
 constexpr DType kElemDType = DType::kBF16;
 constexpr const char* kElemName = "bf16";
 
-__device__ __forceinline__ float elem_to_float(elem_t x) {
+// Host-callable as well as device-callable: the activation capture used by the
+// reference comparison, and the kernel tests, both convert on the host.
+__host__ __device__ __forceinline__ float elem_to_float(elem_t x) {
   return __bfloat162float(x);
 }
-__device__ __forceinline__ elem_t float_to_elem(float v) {
+__host__ __device__ __forceinline__ elem_t float_to_elem(float v) {
   return __float2bfloat16(v);
 }
 

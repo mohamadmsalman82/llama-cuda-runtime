@@ -103,16 +103,18 @@ class Model {
   int sample(const float* device_logits, float temperature, int top_k,
              float top_p, float uniform);
 
-  // Device pointer to the residual stream after the last forward pass, for the
-  // layer-by-layer comparison against the reference dump.
-  struct DebugTaps {
-    bool enabled = false;
-    // One [tokens][hidden] snapshot of the residual stream after each layer.
-    std::vector<std::vector<float>> layer_outputs;
-    std::vector<float> final_norm;
+  // Snapshots of the residual stream, in order, for the layer-by-layer
+  // comparison against the PyTorch reference dump. Names match the ones
+  // tools/dump_reference.py writes: "embed", "layer_0" through
+  // "layer_{n-1}", and "final_norm".
+  struct Tap {
+    std::string name;
+    int tokens = 0;
+    int width = 0;
+    std::vector<float> values;
   };
-  void set_capture_layer_outputs(bool enabled) { debug_.enabled = enabled; }
-  const DebugTaps& debug_taps() const { return debug_; }
+  void set_capture_activations(bool enabled) { capture_activations_ = enabled; }
+  const std::vector<Tap>& activation_taps() const { return taps_; }
 
  private:
   void load_weights(const SafetensorsArchive& archive);
@@ -120,7 +122,8 @@ class Model {
   void run_layers(int tokens, int start_position);
   void attention_prefill(int layer, int tokens, int start_position);
   void attention_decode(int layer, int position);
-  void capture_layer_output(int layer, int tokens);
+  void capture(const std::string& name, const elem_t* source, int tokens,
+               int width);
 
   ModelConfig config_;
   Options options_;
@@ -170,7 +173,8 @@ class Model {
   int position_ = 0;
   int max_tokens_ = 0;
   ForwardStats stats_;
-  DebugTaps debug_;
+  bool capture_activations_ = false;
+  std::vector<Tap> taps_;
 };
 
 }  // namespace lcr

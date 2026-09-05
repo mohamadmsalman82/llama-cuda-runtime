@@ -23,7 +23,8 @@ trap cleanup EXIT
 CXX="${CXX:-c++}"
 FLAGS=(-std=c++17 -fsyntax-only -Wall -Wextra -Wno-unused-parameter
        -Wno-unused-function
-       "-I$ROOT/tools/hostcheck" "-I$ROOT/src" "-I$ROOT/third_party")
+       "-I$ROOT/tools/hostcheck" "-I$ROOT/src" "-I$ROOT/tests"
+       "-I$ROOT/third_party")
 
 if [ ! -f "$ROOT/third_party/nlohmann/json.hpp" ]; then
   echo "third_party/nlohmann/json.hpp is missing; configure the build once first" >&2
@@ -31,7 +32,7 @@ if [ ! -f "$ROOT/third_party/nlohmann/json.hpp" ]; then
 fi
 
 # bash 3.2, which is what macOS ships, has no mapfile.
-SOURCES=$(cd "$ROOT" && find src -name '*.cu' | sort)
+SOURCES=$(cd "$ROOT" && find src tools tests -name '*.cu' 2>/dev/null | sort)
 
 status=0
 for source in $SOURCES; do
