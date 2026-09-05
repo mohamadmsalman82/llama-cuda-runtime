@@ -172,6 +172,13 @@ Same model, same GPU, same prompt, same token count, with prefill and decode tim
 separately. The GGUF has to be f16: a quantized one moves fewer bytes and is a
 different measurement.
 
+## Full writeup
+
+[docs/writeup.md](docs/writeup.md) is the complete account of the project: the
+bandwidth argument it rests on, how each piece was built and validated, the
+hardware bring-up, all results with their caveats, the optimization pass, and
+the mistakes caught along the way.
+
 ## Design notes
 
 [docs/design.md](docs/design.md) has the arithmetic behind the project: why decode
