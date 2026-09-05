@@ -71,23 +71,33 @@ if(CMAKE_CUDA_COMPILER)
   endif()
   find_package(CUDAToolkit REQUIRED)
 
+  # bf16 by default, matching the Llama 3.2 checkpoint. fp16 switches the whole
+  # pipeline; it is one typedef, not a second code path.
+  set(LCR_DTYPE "bf16" CACHE STRING "Element type for weights and activations")
+  set_property(CACHE LCR_DTYPE PROPERTY STRINGS bf16 fp16)
+
   add_library(lcr_cuda STATIC
     src/arena.cu
+    src/cuda_utils.cu
     src/kv_cache.cu
     src/model.cu
+    src/kernels/elementwise.cu
     src/kernels/rmsnorm.cu
     src/kernels/rope.cu
-    src/kernels/swiglu.cu
     src/kernels/attention.cu
     src/kernels/sampling.cu
-    src/kernels/elementwise.cu
   )
   target_link_libraries(lcr_cuda PUBLIC lcr_host CUDA::cublas CUDA::cudart)
+  if(LCR_DTYPE STREQUAL "fp16")
+    target_compile_definitions(lcr_cuda PUBLIC LCR_ELEM_FP16)
+  elseif(NOT LCR_DTYPE STREQUAL "bf16")
+    message(FATAL_ERROR "LCR_DTYPE must be bf16 or fp16, got ${LCR_DTYPE}")
+  endif()
   set_target_properties(lcr_cuda PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
   target_compile_options(lcr_cuda PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr -lineinfo>)
 
-  add_executable(llama-run src/main.cpp)
+  add_executable(llama-run src/main.cu)
   target_link_libraries(llama-run PRIVATE lcr_cuda)
 
   message(STATUS "CUDA enabled, architectures: ${CMAKE_CUDA_ARCHITECTURES}")

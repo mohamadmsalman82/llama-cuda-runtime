@@ -298,6 +298,23 @@ __global__ void merge_splits_kernel(elem_t* __restrict__ out,
   }
 }
 
+
+__global__ void gather_kv_kernel(elem_t* __restrict__ out_keys,
+                                 elem_t* __restrict__ out_values,
+                                 KvCacheView view, int positions) {
+  const int position = blockIdx.x;
+  const int head = blockIdx.y;
+  const int head_dim = view.head_dim;
+  const size_t src = view.offset<true>(head, position);
+  const size_t dst =
+      (static_cast<size_t>(head) * positions + position) * head_dim;
+
+  for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+    out_keys[dst + i] = view.keys[src + i];
+    out_values[dst + i] = view.values[src + i];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Dispatch
 //
@@ -378,6 +395,19 @@ void launch_causal_softmax(elem_t* probs, const float* scores, int num_heads,
                   static_cast<unsigned>(num_heads));
   causal_softmax_kernel<<<grid, kSoftmaxBlock, 0, stream>>>(
       probs, scores, rows, keys, start_position);
+  CUDA_CHECK_LAUNCH();
+}
+
+
+void launch_gather_kv(elem_t* out_keys, elem_t* out_values,
+                      const KvCacheView& view, int positions,
+                      cudaStream_t stream) {
+  if (positions == 0) return;
+  const dim3 grid(static_cast<unsigned>(positions),
+                  static_cast<unsigned>(view.num_kv_heads));
+  const int block = std::min(256, ((view.head_dim + 31) / 32) * 32);
+  gather_kv_kernel<<<grid, block, 0, stream>>>(out_keys, out_values, view,
+                                               positions);
   CUDA_CHECK_LAUNCH();
 }
 

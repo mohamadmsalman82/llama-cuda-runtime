@@ -64,6 +64,14 @@ void launch_causal_softmax(elem_t* probs, const float* scores, int num_heads,
 void launch_merge_heads(elem_t* out, const elem_t* heads, int tokens,
                         int num_heads, int head_dim, cudaStream_t stream);
 
+// Copies a paged cache into a contiguous [num_kv_heads][positions][head_dim]
+// buffer. Prefill attention goes through cuBLAS, which needs a uniform stride
+// between positions; with the contiguous layout the cache already has one, and
+// this is what gives the paged layout the same.
+void launch_gather_kv(elem_t* out_keys, elem_t* out_values,
+                      const KvCacheView& view, int positions,
+                      cudaStream_t stream);
+
 // Single-token attention against the whole cache. This is the kernel the
 // decode-phase bandwidth number is about.
 //
