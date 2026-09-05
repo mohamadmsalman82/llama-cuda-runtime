@@ -49,17 +49,17 @@ the default path, not 4.5x the best it can do.</sub>
 
 This distinction is the entire point of the project.
 
-```mermaid
-flowchart LR
-    subgraph P["PREFILL — whole prompt at once"]
-        direction TB
-        P1["Matrix × Matrix<br/>T rows per weight"] --> P2["Each weight fetched once,<br/>reused T times"] --> P3["<b>Compute-bound</b><br/>7,151 tok/s"]
-    end
-    subgraph D["DECODE — one token"]
-        direction TB
-        D1["Matrix × Vector<br/>1 row per weight"] --> D2["Each weight fetched once,<br/>used once, discarded"] --> D3["<b>Bandwidth-bound</b><br/>322 tok/s"]
-    end
-    P ~~~ D
+```
+        PREFILL  (whole prompt at once)          DECODE  (one token)
+     ┌──────────────────────────────────┐    ┌──────────────────────────────────┐
+     │  Matrix  ×  Matrix               │    │  Matrix  ×  Vector               │
+     │  T rows per weight               │    │  1 row per weight                │
+     │                                  │    │                                  │
+     │  each weight fetched once,       │    │  each weight fetched once,       │
+     │  reused T times                  │    │  used once, discarded            │
+     ├──────────────────────────────────┤    ├──────────────────────────────────┤
+     │  COMPUTE-BOUND      7,151 tok/s  │    │  BANDWIDTH-BOUND      322 tok/s  │
+     └──────────────────────────────────┘    └──────────────────────────────────┘
 ```
 
 |  | prefill (T tokens) | decode (1 token) |
@@ -152,29 +152,29 @@ That's the entire dependency list.
 
 ```mermaid
 flowchart TD
-    A["safetensors<br/>mmap"] --> B["one device allocation<br/>in read order"]
+    A["safetensors mmap"] --> B["one device allocation<br/>in read order"]
     T["tokenizer.json"] --> TK["byte-level BPE"]
     TK --> E["embedding lookup"]
-    B --> L
-    E --> L
+    B --> N1
+    E --> N1
 
-    subgraph L["× 16 layers"]
-        direction TB
-        N1["RMSNorm"] --> QKV["fused QKV<br/>(1 GEMM)"]
-        QKV --> R["RoPE + KV write<br/>(transpose fused in)"]
-        R --> AT{"tokens?"}
-        AT -->|"prefill"| PA["batched GEMM<br/>+ causal softmax"]
-        AT -->|"decode"| DA["custom kernel<br/>GQA group per block"]
+    subgraph L["one of 16 layers"]
+        N1["RMSNorm"] --> QKV["fused QKV<br/>1 GEMM"]
+        QKV --> R["RoPE + KV write<br/>transpose fused in"]
+        R --> AT{"prefill<br/>or decode?"}
+        AT -->|prefill| PA["batched GEMM<br/>+ causal softmax"]
+        AT -->|decode| DA["custom kernel<br/>GQA group per block"]
         PA --> O["o_proj"]
         DA --> O
-        O --> F1["residual + RMSNorm<br/>(fused)"]
-        F1 --> GU["fused gate/up<br/>(1 GEMM)"]
-        GU --> SW["SwiGLU"] --> DN["down_proj"]
-        DN --> F2["residual + RMSNorm<br/>(fused, crosses layer)"]
+        O --> F1["residual + RMSNorm<br/>fused"]
+        F1 --> GU["fused gate/up<br/>1 GEMM"]
+        GU --> SW["SwiGLU"]
+        SW --> DN["down_proj"]
+        DN --> F2["residual + RMSNorm<br/>fused, crosses layer"]
     end
 
-    L --> LM["lm_head<br/>(last position only)"]
-    LM --> S["sampling<br/>(histogram, no 128k sort)"]
+    F2 --> LM["lm_head<br/>last position only"]
+    LM --> S["sampling<br/>histogram, no 128k sort"]
 ```
 
 <details>
