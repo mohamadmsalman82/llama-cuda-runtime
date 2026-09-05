@@ -15,7 +15,7 @@ endif()
 # nlohmann/json, the one allowed third-party library. Pulled as a single header
 # at configure time rather than vendored so the repo stays small.
 # ---------------------------------------------------------------------------
-set(LCR_JSON_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/third_party/json.hpp)
+set(LCR_JSON_HEADER ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/json.hpp)
 if(NOT EXISTS ${LCR_JSON_HEADER})
   message(STATUS "Downloading nlohmann/json v3.11.3 single header")
   file(DOWNLOAD
@@ -40,10 +40,9 @@ target_include_directories(lcr_json INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/third_
 # tested away from the GPU box.
 # ---------------------------------------------------------------------------
 add_library(lcr_host STATIC
+  src/common.cpp
   src/config.cpp
   src/safetensors.cpp
-  src/tokenizer.cpp
-  src/unicode_data.cpp
 )
 target_include_directories(lcr_host PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(lcr_host PUBLIC lcr_json)
@@ -100,8 +99,9 @@ enable_testing()
 function(lcr_add_host_test name)
   add_executable(${name} tests/${name}.cpp)
   target_link_libraries(${name} PRIVATE lcr_host)
+  target_include_directories(${name} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
 lcr_add_host_test(test_safetensors)
-lcr_add_host_test(test_tokenizer)
+lcr_add_host_test(test_config)

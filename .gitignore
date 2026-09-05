@@ -2,7 +2,7 @@ build/
 build-*/
 .cache/
 compile_commands.json
-third_party/json.hpp
+third_party/nlohmann/json.hpp
 models/
 ref/
 *.safetensors
