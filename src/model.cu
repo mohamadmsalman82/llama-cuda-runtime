@@ -370,7 +370,6 @@ const float* Model::decode(int token) {
 void Model::run_layers(int tokens, int start_position) {
   const int hidden = config_.hidden_size;
   const int ffn = config_.intermediate_size;
-  const int64_t residual_elements = static_cast<int64_t>(tokens) * hidden;
 
   input_norm_done_ = false;
   if (capture_activations_) {
@@ -444,10 +443,10 @@ void Model::run_layers(int tokens, int start_position) {
     }
     // The MLP residual join is followed by the next layer's input norm, or by
     // the final norm after the last layer, so it fuses with whichever comes
-    // next. Capturing activations needs the residual stream on its own, so that
-    // path keeps them separate.
-    const bool fuse_forward = !capture_activations_;
-    if (fuse_forward) {
+    // next. The fused kernel writes the updated residual stream to x_ as well
+    // as the normalized copy, so activation capture sees the same tensor it
+    // would have without fusing and the validator exercises the shipping path.
+    {
       const elem_t* next_norm_weight =
           (layer + 1 < config_.num_layers)
               ? layers_[static_cast<size_t>(layer + 1)].input_norm
@@ -456,10 +455,6 @@ void Model::run_layers(int tokens, int start_position) {
       launch_add_residual_rmsnorm(normed_, x_, proj_out_, next_norm_weight,
                                   tokens, hidden, config_.rms_norm_eps, stream_);
       input_norm_done_ = true;
-    } else {
-      ProfileScope scope(&profiler_, "residual add", stream_);
-      launch_add_residual(x_, proj_out_, residual_elements, stream_);
-      input_norm_done_ = false;
     }
 
     if (capture_activations_) {
