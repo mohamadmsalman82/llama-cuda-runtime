@@ -30,13 +30,31 @@ SwiGLU, softmax, decode-phase attention, and sampling. cuBLAS does the matmuls.
 - [x] Activation arena, contiguous and paged KV cache
 - [x] All CUDA kernels, and a model forward pass for both phases
 - [x] CLI, reference-dump validator, GPU kernel tests, benchmark harness
-- [ ] **First run on real hardware.** Everything above compiles as host C++ through
-      `tools/hostcheck.sh`, which type-checks every kernel body and every cuBLAS
-      call, but the machine this was written on has no NVIDIA toolkit, so nothing
-      here has yet executed on a GPU.
-- [ ] Numerical validation against the PyTorch reference, layer by layer
-- [ ] Profiling with Nsight Compute, and the kernel optimization pass
-- [ ] Benchmark table, bandwidth analysis, prefill/decode breakdown
+- [x] Runs on hardware. First `nvcc` build passed with no errors, every kernel
+      test passes on device, and it generates coherent text.
+- [x] Numerical validation against the PyTorch reference, layer by layer: every
+      layer within tolerance, identical top-5 logits, 16 of 16 greedy tokens
+      identical
+- [x] Benchmark table, bandwidth analysis, prefill/decode breakdown, KV cache
+      comparison. See [docs/benchmarks.md](docs/benchmarks.md).
+- [ ] Profiling with Nsight, and the kernel optimization pass
+- [ ] llama.cpp row in the benchmark table, which needs an f16 GGUF
+
+## Results
+
+RTX 4090, Llama-3.2-1B-Instruct in bf16, before any optimization:
+
+| runtime | decode tok/s | ms/token | achieved GB/s | % of peak |
+|---|---:|---:|---:|---:|
+| this runtime | 309.0 | 3.236 | 765 | **75.9%** |
+| HuggingFace Transformers | 72.0 | 13.894 | 178 | 17.7% |
+
+Decoding one token means reading all 2.472 GB of weights out of HBM, so
+tokens/sec and achieved bandwidth are one measurement in two units. The ceiling
+on this card is 407 tokens/s. The HuggingFace figure is its default path, which
+falls back to the legacy tuple KV cache; `StaticCache` with `torch.compile`
+would raise it considerably. [docs/benchmarks.md](docs/benchmarks.md) has the
+full table, the prefill split, and the KV cache comparison.
 
 ## Building
 
