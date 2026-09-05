@@ -184,6 +184,9 @@ class Model {
   int position_ = 0;
   int max_tokens_ = 0;
   ForwardStats stats_;
+  // Set when a fused residual-and-norm has already produced the normalized
+  // input the next stage expects, so that stage skips its own norm.
+  bool input_norm_done_ = false;
   bool capture_activations_ = false;
   std::vector<Tap> taps_;
   Profiler profiler_;

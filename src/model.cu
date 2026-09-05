@@ -372,6 +372,7 @@ void Model::run_layers(int tokens, int start_position) {
   const int ffn = config_.intermediate_size;
   const int64_t residual_elements = static_cast<int64_t>(tokens) * hidden;
 
+  input_norm_done_ = false;
   if (capture_activations_) {
     taps_.clear();
     taps_.reserve(static_cast<size_t>(config_.num_layers) + 2);
@@ -381,11 +382,12 @@ void Model::run_layers(int tokens, int start_position) {
   for (int layer = 0; layer < config_.num_layers; ++layer) {
     const LayerWeights& w = layers_[static_cast<size_t>(layer)];
 
-    {
+    if (!input_norm_done_) {
       ProfileScope scope(&profiler_, "rmsnorm", stream_);
       launch_rmsnorm(normed_, x_, w.input_norm, tokens, hidden,
                      config_.rms_norm_eps, stream_);
     }
+    input_norm_done_ = false;
     const int qkv_stride = config_.q_dim() + 2 * config_.kv_dim();
     {
       ProfileScope scope(&profiler_, "qkv_proj (fused GEMM)", stream_);
@@ -420,13 +422,10 @@ void Model::run_layers(int tokens, int start_position) {
               config_.q_dim(), hidden);
     }
     {
-      ProfileScope scope(&profiler_, "residual add", stream_);
-      launch_add_residual(x_, proj_out_, residual_elements, stream_);
-    }
-    {
-      ProfileScope scope(&profiler_, "rmsnorm", stream_);
-      launch_rmsnorm(normed_, x_, w.post_attention_norm, tokens, hidden,
-                     config_.rms_norm_eps, stream_);
+      // The attention residual join and the norm that always follows it.
+      ProfileScope scope(&profiler_, "residual+rmsnorm (fused)", stream_);
+      launch_add_residual_rmsnorm(normed_, x_, proj_out_, w.post_attention_norm,
+                                  tokens, hidden, config_.rms_norm_eps, stream_);
     }
     {
       ProfileScope scope(&profiler_, "mlp gate/up (fused GEMM)", stream_);
@@ -443,9 +442,24 @@ void Model::run_layers(int tokens, int start_position) {
       gemm_nt(cublas_, proj_out_, kCublasElemType, act_, w.down_proj, tokens,
               ffn, hidden);
     }
-    {
+    // The MLP residual join is followed by the next layer's input norm, or by
+    // the final norm after the last layer, so it fuses with whichever comes
+    // next. Capturing activations needs the residual stream on its own, so that
+    // path keeps them separate.
+    const bool fuse_forward = !capture_activations_;
+    if (fuse_forward) {
+      const elem_t* next_norm_weight =
+          (layer + 1 < config_.num_layers)
+              ? layers_[static_cast<size_t>(layer + 1)].input_norm
+              : final_norm_;
+      ProfileScope scope(&profiler_, "residual+rmsnorm (fused)", stream_);
+      launch_add_residual_rmsnorm(normed_, x_, proj_out_, next_norm_weight,
+                                  tokens, hidden, config_.rms_norm_eps, stream_);
+      input_norm_done_ = true;
+    } else {
       ProfileScope scope(&profiler_, "residual add", stream_);
       launch_add_residual(x_, proj_out_, residual_elements, stream_);
+      input_norm_done_ = false;
     }
 
     if (capture_activations_) {
@@ -453,11 +467,12 @@ void Model::run_layers(int tokens, int start_position) {
     }
   }
 
-  {
+  if (!input_norm_done_) {
     ProfileScope scope(&profiler_, "final norm", stream_);
     launch_rmsnorm(normed_, x_, final_norm_, tokens, hidden,
                    config_.rms_norm_eps, stream_);
   }
+  input_norm_done_ = false;
 
   if (capture_activations_) capture("final_norm", normed_, tokens, hidden);
 

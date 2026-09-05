@@ -28,6 +28,18 @@ void launch_rmsnorm(elem_t* out, const elem_t* x, const elem_t* weight,
 void launch_add_residual(elem_t* x, const elem_t* delta, int64_t count,
                          cudaStream_t stream);
 
+// The residual join and the normalization that always follows it, in one pass:
+//   x   += delta
+//   out  = rmsnorm(x) * weight
+//
+// Worth fusing for the launch, not the bandwidth. At decode these kernels move
+// 12 KB and take 3.6 us, which is 3 GB/s: they are latency-bound, so removing
+// one launch per join saves far more than the memory traffic does. It also
+// avoids writing x and immediately reading it back.
+void launch_add_residual_rmsnorm(elem_t* out, elem_t* x, const elem_t* delta,
+                                 const elem_t* weight, int tokens, int dim,
+                                 float eps, cudaStream_t stream);
+
 // out = silu(gate) * up, with silu(v) = v * sigmoid(v).
 void launch_swiglu(elem_t* out, const elem_t* gate, const elem_t* up,
                    int64_t count, cudaStream_t stream);
